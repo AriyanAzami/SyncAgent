@@ -1,0 +1,10 @@
+# SyncAgent workspace state — machine-local, not source
+.syncagent/telemetry.jsonl
+.syncagent/refs/
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
