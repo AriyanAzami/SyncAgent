@@ -118,9 +118,23 @@ source ~/.bashrc
 <summary><b>Windows</b> — PowerShell profile</summary>
 
 ```powershell
+New-Item -ItemType Directory -Force (Split-Path $PROFILE -Parent) | Out-Null
 Add-Content $PROFILE 'function sync { python "$HOME\tools\SyncAgent\syncagent.py" @args }'
 . $PROFILE
 ```
+
+The first line is not optional. If you have never customised PowerShell, the folder
+holding your profile does not exist yet, and `Add-Content` creates files but not the
+directories above them — so on a clean machine the second line fails on its own with
+`Could not find a part of the path`. This is more likely than it sounds when Documents is
+redirected to OneDrive, which puts the profile somewhere you have certainly never
+created by hand.
+
+Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh`) read *different*
+profile files. Run the block in whichever one you use — or in both.
+
+If `. $PROFILE` reports that running scripts is disabled, that is the execution policy:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 </details>
 
@@ -411,6 +425,10 @@ be installed separately.
 **macOS: `command not found: python`** — macOS has no `python`, only `python3`. Use
 `python3` in your alias. The generated workspace bakes in the full interpreter path at
 `init` time, so the agents are unaffected either way.
+
+**Windows: `Add-Content $PROFILE` fails with `Could not find a part of the path`** — the
+directory holding your PowerShell profile has never been created. Run
+`New-Item -ItemType Directory -Force (Split-Path $PROFILE -Parent)` first, then append.
 
 **Gemini returns nothing, or the output file contains your own prompt back** — that is
 almost always authentication. Run `gemini -p "hi" --output-format json` directly and
