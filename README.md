@@ -149,6 +149,7 @@ sync init ~/work/scheduler-api --track code
 cd ~/work/scheduler-api
 sync start          # prints the three launch commands
 sync dash           # dashboard at http://127.0.0.1:7777
+sync usage          # what the session has spent, and how much headroom is left
 ```
 
 Open two terminals — Claude in one, the dashboard in the other. Then, inside Claude:
@@ -345,16 +346,58 @@ to match to your actual plan:
            "budget_tokens_per_day": 120000 }
 ```
 
-**Claude's meter is self-reported.** Gemini's and Codex's numbers come from their JSON
-output and are exact. An interactive Claude session cannot be instrumented from outside,
-so Claude logs its own estimate at the end of each build phase:
+**Claude's meter is measured, not self-reported.** Claude Code appends every assistant
+turn, with the exact usage block the API returned, to
+`~/.claude/projects/<slugged-cwd>/<session-id>.jsonl`. SyncAgent reads that file, so the
+dashboard tracks the live session within seconds and needs nothing from Claude itself:
 
 ```bash
-sync log --role build --tokens 48000 --note "auth endpoints"
+sync usage
 ```
 
-The gauges therefore mix one estimate with two measurements. Do not read them as
-uniformly accurate.
+```
+plan max-5x  -  weighted tokens (output x5, cache read x0.1)
+
+this session     30 calls     2,341,498 raw       432,925 weighted
+  in 1,911 / out 24,609 / cache write 66,498 / cache read 2,248,480
+
+5h window      [######......................]  23.2%   2,317,591 / 10,000,000
+               resets in 3h 51m
+7d window      [#...........................]   1.9%   2,317,591 / 125,000,000
+
+burn rate      1,840,931 weighted tok/hour
+headroom       4h 10m of work left (binding limit: window)
+```
+
+`sync log` still exists for older workspaces, and the panel falls back to it when no
+transcripts are found. Gemini's and Codex's numbers come from their JSON output and are
+exact.
+
+**Weighted tokens.** A cached read costs a tenth of a fresh input token and an output
+token costs five times one, so a raw total is a poor proxy for what a subscription is
+being charged. Every count is weighted by its class before it hits a gauge:
+
+```json
+"limits": {
+  "plan": "max-5x",
+  "window_hours": 5,
+  "window_tokens": 10000000,
+  "weekly_tokens": 125000000,
+  "weights": { "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1 }
+}
+```
+
+**The ceilings are estimates.** Anthropic does not publish subscription limits in tokens.
+The presets (`pro`, `max-5x`, `max-20x`) are calibrated guesses, and the whole point of
+putting them in `config.json` is that you correct them the first time you hit a wall:
+
+```bash
+sync usage --plan max-20x
+sync usage --window-tokens 30000000 --weekly-tokens 400000000
+```
+
+The percentages are only as good as those two numbers. The burn rate, the raw counts and
+the reset clock are measured and exact.
 
 ## Configuration
 
@@ -369,9 +412,16 @@ uniformly accurate.
     "claude": { "model": "opus",           "effort": "high",    "budget_tokens_per_day": 2000000 },
     "gemini": { "model": "gemini-2.5-pro", "effort": "default", "budget_tokens_per_day": 1000000 },
     "codex":  { "model": "gpt-5-codex",    "effort": "medium",  "budget_tokens_per_day": 120000 }
+  },
+  "limits": {
+    "plan": "max-5x", "window_hours": 5,
+    "window_tokens": 10000000, "weekly_tokens": 125000000
   }
 }
 ```
+
+`limits` is what the subscription gauges read; see
+[Costs and token discipline](#costs-and-token-discipline).
 
 The real tuning surface is `.syncagent/prompts/` — `align.md`, `research.md`,
 `review.md`, `tiebreak.md`. They are plain markdown with `{SPEC}` and `{INPUT}`
@@ -396,9 +446,10 @@ reads at the start of every session, including the exact CLI invocation for this
 | `sync ask codex --role tiebreak --text "..."` | settle a disagreement |
 | `sync ref <path> [--copy] [--rename N]` | link outside material in read-only |
 | `sync gate <phase>` | advance the phase; enforces the spec gate and roadmap validity |
-| `sync log --role build --tokens N [--note "..."]` | Claude self-reports its usage |
+| `sync log --role build --tokens N [--note "..."]` | Claude self-reports its usage (fallback only) |
 | `sync status` | one-screen text summary |
-| `sync dash [--port N]` | dashboard on `127.0.0.1`, polls every 3 seconds |
+| `sync usage [--json] [--plan P] [--window-tokens N] [--weekly-tokens N]` | measured spend, window and weekly headroom, burn rate |
+| `sync dash [--port N]` | dashboard on `127.0.0.1`, polls every 2 seconds |
 
 **Roadmap:**
 

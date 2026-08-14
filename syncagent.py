@@ -18,6 +18,7 @@ Subcommands
   resume  pick up an interrupted session without re-deriving the plan
   gate    advance the project phase
   status  one-screen text summary
+  usage   measured Claude token spend and how much subscription headroom is left
   dash    local web dashboard at http://127.0.0.1:7777
 """
 
@@ -31,7 +32,7 @@ import socketserver
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ORCH = ".syncagent"
@@ -650,10 +651,11 @@ re-deriving it is the single most expensive thing a resumed session can do.
   `{cli} ref <path>` rather than reaching for it directly.
 - Log every consult with the SyncAgent CLI so it shows up on the dashboard. If you shell
   out to `gemini` or `codex` directly, the telemetry is lost and the dashboard lies.
-- Your own usage cannot be measured from outside an interactive session. At the end of
-  each {build} phase, self-report it:
-  `{cli} log --role {build} --tokens <your best estimate> --note "<what you did>"`
-  An honest estimate beats a blank meter. Do not inflate it to look busy.
+- Your own token usage is measured for you, straight off this session's transcript. Do
+  not estimate it and do not run `log` for it. If the user asks how much is left, run
+  `{cli} usage` and read the answer out; the burn rate and the headroom are real numbers.
+- If `{cli} usage` reports no transcripts, the run is not being recorded. Say so rather
+  than guessing at a figure.
 """
 
 
@@ -855,6 +857,9 @@ def cmd_init(args):
             "codex":  {"model": "gpt-5-codex", "effort": "medium", "role": "tiebreak only",
                        "budget_tokens_per_day": 120000},
         },
+        # Edit these once you know your own ceiling. `usage --plan max-20x` and
+        # `usage --window-tokens N` write the same block.
+        "limits": dict(DEFAULT_LIMITS),
     })
 
     write_json(root / ORCH / "state.json", {
@@ -1425,6 +1430,295 @@ def cmd_gate(args):
     print(f"phase -> {args.phase}")
 
 
+# --------------------------------------------------------------------------
+# live Claude usage - measured off the local session transcripts
+# --------------------------------------------------------------------------
+#
+# Claude Code appends every assistant turn, with the exact usage block the API
+# returned, to ~/.claude/projects/<slugged-cwd>/<session-id>.jsonl. That file is
+# the only real-time source of truth for what this session has actually spent.
+# The `log` command is a self-report Claude has to remember to make, and a
+# self-report always undercounts, which is why the dashboard used to disagree
+# with reality.
+
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
+# Subscription limits are consumption budgets, not message counts, and the four
+# token classes are nowhere near equal: a cached read costs a tenth of a fresh
+# input token and an output token costs five times one. Weighting each class by
+# its relative price is what makes a single "how much is left" number honest.
+TOKEN_WEIGHTS = {"input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1}
+
+# Anthropic does not publish the subscription ceilings in tokens, so these are
+# calibrated estimates rather than quoted figures. They are written into
+# config.json exactly so that a user who hits a limit at 60% can correct them:
+#   syncagent.py usage --calibrate
+PLAN_LIMITS = {
+    "pro":     {"window":  2_000_000, "weekly":  25_000_000},
+    "max-5x":  {"window": 10_000_000, "weekly": 125_000_000},
+    "max-20x": {"window": 40_000_000, "weekly": 500_000_000},
+}
+DEFAULT_LIMITS = {
+    "plan": "max-5x",
+    "window_hours": 5,
+    "window_tokens": PLAN_LIMITS["max-5x"]["window"],
+    "weekly_tokens": PLAN_LIMITS["max-5x"]["weekly"],
+    "weights": TOKEN_WEIGHTS,
+}
+USAGE_KEYS = ("input", "output", "cache_write", "cache_read", "total", "weighted")
+
+
+def parse_ts(value):
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def project_slug(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", str(Path(path).resolve()))
+
+
+def _transcript_cwd(path, max_lines=60):
+    """The workspace a transcript belongs to, as it recorded it itself."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except json.JSONDecodeError:
+                    continue
+                if cwd:
+                    return str(Path(cwd)).lower()
+    except OSError:
+        pass
+    return None
+
+
+def transcript_dir(root):
+    direct = CLAUDE_PROJECTS / project_slug(root)
+    if direct.is_dir():
+        return direct
+    # The slug rule has changed between Claude Code versions. Rather than guess
+    # at it, ask the transcripts which one recorded this workspace.
+    if not CLAUDE_PROJECTS.is_dir():
+        return None
+    target = str(Path(root).resolve()).lower()
+    for d in sorted(CLAUDE_PROJECTS.iterdir()):
+        if not d.is_dir():
+            continue
+        for f in d.glob("*.jsonl"):
+            if _transcript_cwd(f) == target:
+                return d
+    return None
+
+
+def _usage_record(entry, weights):
+    msg = entry.get("message") or {}
+    u = msg.get("usage")
+    ts = parse_ts(entry.get("timestamp"))
+    if not isinstance(u, dict) or ts is None:
+        return None
+    counts = {
+        "input": int(u.get("input_tokens") or 0),
+        "output": int(u.get("output_tokens") or 0),
+        "cache_write": int(u.get("cache_creation_input_tokens") or 0),
+        "cache_read": int(u.get("cache_read_input_tokens") or 0),
+    }
+    rec = dict(counts)
+    rec["total"] = sum(counts.values())
+    rec["weighted"] = round(sum(counts[k] * weights.get(k, 1.0) for k in counts))
+    rec["ts"] = ts
+    rec["session"] = entry.get("sessionId") or ""
+    rec["model"] = msg.get("model") or "unknown"
+    return rec
+
+
+def read_claude_usage(root, weights=None):
+    """Every assistant turn this workspace has produced, deduplicated.
+
+    Resumed and forked sessions copy earlier turns into the new transcript, so
+    the same API call appears in several files. Keying on the message id counts
+    each call exactly once.
+    """
+    weights = weights or TOKEN_WEIGHTS
+    d = transcript_dir(root)
+    if not d:
+        return []
+    seen, out = set(), []
+    for f in sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime):
+        try:
+            fh = open(f, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "assistant":
+                    continue
+                key = (entry.get("message") or {}).get("id") or entry.get("requestId")
+                if key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                rec = _usage_record(entry, weights)
+                if rec:
+                    out.append(rec)
+    out.sort(key=lambda r: r["ts"])
+    return out
+
+
+def _sum_usage(records):
+    agg = {k: sum(r[k] for r in records) for k in USAGE_KEYS}
+    agg["calls"] = len(records)
+    agg["first"] = records[0]["ts"].isoformat() if records else None
+    agg["last"] = records[-1]["ts"].isoformat() if records else None
+    return agg
+
+
+def _bucket(records, used, limit, now, window=None):
+    """A spend bucket plus the two numbers a human actually wants: what fraction
+    of the ceiling is gone, and when the ceiling stops applying."""
+    block = _sum_usage(records)
+    block["limit"] = limit
+    block["remaining"] = max(limit - used, 0) if limit else 0
+    block["percent"] = round(min(used / limit, 1.0) * 100, 1) if limit else 0.0
+    block["over"] = bool(limit and used > limit)
+    if window and records:
+        block["resets"] = (records[0]["ts"] + window).isoformat()
+        block["resets_in_hours"] = round(
+            max((records[0]["ts"] + window - now).total_seconds(), 0) / 3600, 2)
+    else:
+        block["resets"] = None
+        block["resets_in_hours"] = None
+    return block
+
+
+def resolve_limits(cfg):
+    """Config wins over the plan preset, the preset wins over the default."""
+    configured = cfg.get("limits") or {}
+    limits = dict(DEFAULT_LIMITS)
+    preset = PLAN_LIMITS.get(configured.get("plan", limits["plan"]))
+    if preset:
+        limits["window_tokens"] = preset["window"]
+        limits["weekly_tokens"] = preset["weekly"]
+    limits.update(configured)
+    weights = dict(TOKEN_WEIGHTS)
+    weights.update(limits.get("weights") or {})
+    limits["weights"] = weights
+    return limits
+
+
+def claude_usage_report(root, cfg=None):
+    """What this workspace has spent, over the three windows that matter: the
+    live session, the rolling subscription window, and the week."""
+    cfg = cfg if cfg is not None else read_json(root / ORCH / "config.json")
+    limits = resolve_limits(cfg)
+    weights = limits["weights"]
+    records = read_claude_usage(root, weights)
+
+    now = datetime.now(timezone.utc)
+    window = timedelta(hours=float(limits.get("window_hours") or 5))
+    win_limit = int(limits.get("window_tokens") or 0)
+    week_limit = int(limits.get("weekly_tokens") or 0)
+
+    report = {
+        "available": bool(records),
+        "source": str(transcript_dir(root) or ""),
+        "plan": limits.get("plan", "custom"),
+        "window_hours": window.total_seconds() / 3600,
+        "weights": weights,
+        "estimated_limits": True,
+        "updated": now.isoformat(timespec="seconds"),
+    }
+    if not records:
+        report["reason"] = ("No Claude Code transcripts found for this workspace. "
+                            "Run Claude from inside it and the meter fills itself.")
+        return report
+
+    in_window = [r for r in records if r["ts"] >= now - window]
+    in_week = [r for r in records if r["ts"] >= now - timedelta(days=7)]
+    in_day = [r for r in records if r["ts"] >= now - timedelta(days=1)]
+
+    win_used = sum(r["weighted"] for r in in_window)
+    week_used = sum(r["weighted"] for r in in_week)
+
+    session_id = records[-1]["session"]
+    session = [r for r in records if r["session"] == session_id]
+
+    report["session"] = _sum_usage(session)
+    report["session"]["id"] = session_id
+    report["day"] = _sum_usage(in_day)
+    report["window"] = _bucket(in_window, win_used, win_limit, now, window)
+    report["week"] = _bucket(in_week, week_used, week_limit, now, timedelta(days=7))
+
+    # Burn rate from the last hour, because that is what "how much longer can I
+    # keep working" depends on. With too little recent traffic to extrapolate
+    # from, fall back to the average across the whole window.
+    recent = [r for r in records if r["ts"] >= now - timedelta(hours=1)]
+    if len(recent) >= 2:
+        burn = sum(r["weighted"] for r in recent)
+    elif in_window:
+        elapsed = max((now - in_window[0]["ts"]).total_seconds() / 3600, 0.05)
+        burn = win_used / elapsed
+    else:
+        burn = 0.0
+    report["burn_per_hour"] = round(burn)
+
+    hours_left = None
+    if burn > 0:
+        candidates = [b["remaining"] / burn for b in (report["window"], report["week"])
+                      if b["limit"]]
+        if candidates:
+            hours_left = min(candidates)
+    report["hours_left"] = round(hours_left, 2) if hours_left is not None else None
+    report["runs_out"] = ((now + timedelta(hours=hours_left)).isoformat(timespec="seconds")
+                          if hours_left is not None else None)
+    report["binding"] = ("week" if report["week"]["limit"] and report["window"]["limit"]
+                         and report["week"]["percent"] > report["window"]["percent"]
+                         else "window")
+
+    by_model = {}
+    for r in session:
+        blank = dict.fromkeys(USAGE_KEYS, 0)
+        blank["calls"] = 0
+        m = by_model.setdefault(r["model"], blank)
+        for k in USAGE_KEYS:
+            m[k] += r[k]
+        m["calls"] += 1
+    report["by_model"] = by_model
+    return report
+
+
+# How long an agent may go quiet before the panel stops calling it live. Claude
+# streams a transcript line every few seconds while it works; gemini and codex
+# are one-shot, so a recent call is the only evidence they were ever here.
+LIVE_SECONDS = 90
+IDLE_SECONDS = 15 * 60
+
+
+def agent_state(installed, idle_seconds):
+    if not installed:
+        return "missing"
+    if idle_seconds is None:
+        return "never"
+    if idle_seconds <= LIVE_SECONDS:
+        return "live"
+    if idle_seconds <= IDLE_SECONDS:
+        return "idle"
+    return "cold"
+
+
 def collect_status(root):
     cfg = read_json(root / ORCH / "config.json")
     state = read_json(root / ORCH / "state.json")
@@ -1463,7 +1757,30 @@ def collect_status(root):
             "tokens": sum(e.get("tokens_total", 0) for e in calls),
             "seconds": round(sum(e.get("duration_ms", 0) for e in calls) / 1000, 1),
             "last": calls[-1]["ts"] if calls else None,
+            "measured": False,
         }
+
+    # Claude's own row came from self-reported `log` events, which is why it
+    # never matched what the subscription was actually being charged. Where the
+    # transcripts exist they replace the guess with the measurement.
+    usage = claude_usage_report(root, cfg)
+    if usage.get("available") and "claude" in per_agent:
+        row = per_agent["claude"]
+        row["tokens"] = usage["day"]["weighted"]
+        row["calls"] = usage["day"]["calls"]
+        row["last"] = usage["day"]["last"]
+        row["measured"] = True
+
+    # An agent listed in config.json is a plan, not a pulse. A panel that shows
+    # gemini sitting there long after it stopped answering is worse than one
+    # that shows nothing, so every row carries when it was last actually heard
+    # from and whether its binary is even installed.
+    now = datetime.now(timezone.utc)
+    for name, row in per_agent.items():
+        row["installed"] = have(name)
+        seen = parse_ts(row.get("last"))
+        row["idle_seconds"] = round((now - seen).total_seconds()) if seen else None
+        row["state"] = agent_state(row["installed"], row["idle_seconds"])
 
     session_start = state.get("session_started", "")
     noise = {".git", "node_modules", "__pycache__", "venv", ".venv", "dist",
@@ -1509,6 +1826,7 @@ def collect_status(root):
         "pending_questions": [q for q in questions if not q["answered"]],
         "tasks": tasks_block,
         "agents": per_agent,
+        "usage": usage,
         "events": events[-40:][::-1],
         "files_made": made[:40],
         "files_fed": fed[:40],
@@ -1534,6 +1852,72 @@ def cmd_log(args):
     print(f"logged claude/{args.role} ({args.tokens:,} tok)")
 
 
+def _meter_bar(percent, width=28):
+    lit = int(round(min(percent, 100) / 100 * width))
+    return "[" + "#" * lit + "." * (width - lit) + "]"
+
+
+def _fmt_hours(hours):
+    if hours is None:
+        return "unknown"
+    h, m = int(hours), int(round((hours - int(hours)) * 60))
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+
+def cmd_usage(args):
+    root = find_root()
+    cfg_path = root / ORCH / "config.json"
+    cfg = read_json(cfg_path)
+
+    if args.plan or args.window_tokens or args.weekly_tokens:
+        limits = dict(cfg.get("limits") or {})
+        if args.plan:
+            limits["plan"] = args.plan
+            preset = PLAN_LIMITS.get(args.plan)
+            if preset:
+                limits["window_tokens"] = preset["window"]
+                limits["weekly_tokens"] = preset["weekly"]
+        if args.window_tokens:
+            limits["window_tokens"] = args.window_tokens
+        if args.weekly_tokens:
+            limits["weekly_tokens"] = args.weekly_tokens
+        cfg["limits"] = limits
+        write_json(cfg_path, cfg)
+        print(f"limits updated in {cfg_path.relative_to(root)}")
+
+    u = claude_usage_report(root, cfg)
+    if args.json:
+        print(json.dumps(u, indent=2))
+        return
+    if not u.get("available"):
+        print(u.get("reason", "No measured Claude usage yet."))
+        print(f"looked in: {u.get('source') or CLAUDE_PROJECTS}")
+        return
+
+    s, w, k = u["session"], u["window"], u["week"]
+    print(f"plan {u['plan']}  -  weighted tokens (output x{u['weights']['output']:g}, "
+          f"cache read x{u['weights']['cache_read']:g})")
+    print()
+    print(f"this session   {s['calls']:>4} calls  {s['total']:>12,} raw  "
+          f"{s['weighted']:>12,} weighted")
+    print(f"  in {s['input']:,} / out {s['output']:,} / "
+          f"cache write {s['cache_write']:,} / cache read {s['cache_read']:,}")
+    print()
+    win_label = f"{u['window_hours']:g}h window"
+    print(f"{win_label:<14} {_meter_bar(w['percent'])} {w['percent']:>5.1f}%"
+          f"   {w['weighted']:,} / {w['limit']:,}")
+    print(f"{'':<14} resets in {_fmt_hours(w['resets_in_hours'])}")
+    print(f"{'7d window':<14} {_meter_bar(k['percent'])} {k['percent']:>5.1f}%"
+          f"   {k['weighted']:,} / {k['limit']:,}")
+    print()
+    print(f"burn rate      {u['burn_per_hour']:,} weighted tok/hour")
+    print(f"headroom       {_fmt_hours(u['hours_left'])} of work left "
+          f"(binding limit: {u['binding']})")
+    print()
+    print("Ceilings are estimates - Anthropic does not publish them in tokens.")
+    print(f"Correct them with: {cli_invocation()} usage --window-tokens N --weekly-tokens N")
+
+
 def cmd_status(args):
     root = find_root()
     s = collect_status(root)
@@ -1543,7 +1927,15 @@ def cmd_status(args):
     print()
     for name, a in s["agents"].items():
         print(f"  {name:<8} {a['model']:<18} {a['calls']:>3} calls  "
-              f"{a['tokens']:>9,} tok  {a['seconds']:>6.1f}s")
+              f"{a['tokens']:>9,} tok  {a['seconds']:>6.1f}s"
+              f"{'  measured' if a.get('measured') else ''}")
+
+    u = s.get("usage") or {}
+    if u.get("available"):
+        print()
+        print(f"  budget   {u['window_hours']:g}h window {u['window']['percent']:.1f}% used, "
+              f"week {u['week']['percent']:.1f}% used, "
+              f"~{_fmt_hours(u['hours_left'])} left at {u['burn_per_hour']:,} tok/h")
     if s["tasks"] and not s["tasks"].get("error"):
         t = s["tasks"]
         print()
@@ -1613,8 +2005,10 @@ DASH_HTML = r"""<!DOCTYPE html>
     --ground:#EDEFEA; --panel:#F6F7F3; --ink:#1B211E; --soft:#5C6660;
     --rule:#C7CDC3; --claude:#3B5E4A; --gemini:#2E5C8A; --codex:#7A6A2F;
     --alert:#A8392B;
-    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-    --serif:"Iowan Old Style",Georgia,"Times New Roman",serif;
+    --mono:"JetBrains Mono","Cascadia Code","SF Mono",ui-monospace,Menlo,
+           "DejaVu Sans Mono",Consolas,monospace;
+    --serif:"Iowan Old Style","Source Serif 4",Charter,Georgia,
+            "Times New Roman",serif;
   }
   @media (prefers-color-scheme:dark){
     :root{--ground:#141815;--panel:#1C211D;--ink:#E4E8E2;--soft:#8D968F;
@@ -1623,15 +2017,17 @@ DASH_HTML = r"""<!DOCTYPE html>
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--mono);
-       font-size:13px;line-height:1.5;padding:28px 24px 60px}
-  h1{font-family:var(--serif);font-weight:400;font-size:30px;margin:0;letter-spacing:-.01em}
-  h2{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.14em;
-     text-transform:uppercase;color:var(--soft);margin:0 0 12px;
-     border-bottom:1px solid var(--rule);padding-bottom:7px}
-  .wrap{max-width:1180px;margin:0 auto}
+       font-size:15px;line-height:1.6;padding:32px 26px 64px;
+       -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+       font-variant-numeric:tabular-nums}
+  h1{font-family:var(--serif);font-weight:400;font-size:40px;margin:0;letter-spacing:-.015em}
+  h2{font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.14em;
+     text-transform:uppercase;color:var(--soft);margin:0 0 13px;
+     border-bottom:1px solid var(--rule);padding-bottom:8px}
+  .wrap{max-width:1280px;margin:0 auto}
   header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
          border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:24px}
-  .sub{color:var(--soft);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+  .sub{color:var(--soft);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
   @media(max-width:860px){.grid{grid-template-columns:1fr}}
   .panel{background:var(--panel);border:1px solid var(--rule);padding:16px}
@@ -1639,7 +2035,7 @@ DASH_HTML = r"""<!DOCTYPE html>
 
   /* phase rail */
   .rail{display:flex;gap:0;margin-bottom:22px;border:1px solid var(--rule)}
-  .ph{flex:1;padding:9px 6px;text-align:center;font-size:10px;letter-spacing:.12em;
+  .ph{flex:1;padding:11px 6px;text-align:center;font-size:11.5px;letter-spacing:.12em;
       text-transform:uppercase;color:var(--soft);border-right:1px solid var(--rule);
       background:var(--panel)}
   .ph:last-child{border-right:none}
@@ -1650,36 +2046,62 @@ DASH_HTML = r"""<!DOCTYPE html>
   .agent{margin-bottom:18px}
   .agent:last-child{margin-bottom:0}
   .arow{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
-  .aname{font-weight:600;font-size:14px}
-  .ameta{color:var(--soft);font-size:11px}
-  .meter{display:flex;gap:2px;margin-top:7px;height:12px}
+  .aname{font-weight:600;font-size:17px}
+  .ameta{color:var(--soft);font-size:13px}
+  .meter{display:flex;gap:2px;margin-top:8px;height:14px}
   .seg{flex:1;background:var(--rule);opacity:.45}
   .seg.lit{opacity:1}
   .c-claude .seg.lit{background:var(--claude)} .c-claude .aname{color:var(--claude)}
   .c-gemini .seg.lit{background:var(--gemini)} .c-gemini .aname{color:var(--gemini)}
   .c-codex  .seg.lit{background:var(--codex)}  .c-codex  .aname{color:var(--codex)}
-  .anum{font-size:11px;color:var(--soft);margin-top:5px;display:flex;
+  .anum{font-size:12.5px;color:var(--soft);margin-top:6px;display:flex;
         justify-content:space-between}
+
+  /* liveness */
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+       background:var(--rule);margin-right:7px;vertical-align:middle}
+  .s-live .dot{background:var(--claude);box-shadow:0 0 0 0 var(--claude);
+               animation:pulse 1.8s infinite}
+  .s-idle .dot{background:var(--codex)}
+  .s-cold .dot{background:var(--rule)}
+  .s-missing .dot,.s-never .dot{background:transparent;border:1px solid var(--rule)}
+  .s-cold .aname,.s-missing .aname,.s-never .aname{opacity:.5}
+  .s-missing .meter,.s-never .meter,.s-cold .meter{opacity:.4}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(127,179,148,.55)}
+    70%{box-shadow:0 0 0 6px rgba(127,179,148,0)}
+    100%{box-shadow:0 0 0 0 rgba(127,179,148,0)}}
+  .state{font-size:11.5px;letter-spacing:.12em;text-transform:uppercase}
+  .s-live .state{color:var(--claude)}
+  .s-idle .state{color:var(--codex)}
+
+  /* budget */
+  .budget{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  @media(max-width:860px){.budget{grid-template-columns:1fr}}
+  .big{font-family:var(--serif);font-size:36px;line-height:1.1;letter-spacing:-.02em}
+  .cap{font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft)}
+  .warn .big{color:var(--alert)}
+  .fine{font-size:12px;color:var(--soft);margin-top:12px;font-style:italic}
 
   /* roadmap */
   .road{margin-bottom:20px}
   .roadhead{display:flex;justify-content:space-between;align-items:baseline;
-            margin-bottom:9px;font-size:11px;color:var(--soft)}
-  .bar{display:flex;gap:2px;height:12px;margin-bottom:13px}
+            margin-bottom:10px;font-size:13px;color:var(--soft)}
+  .bar{display:flex;gap:2px;height:14px;margin-bottom:13px}
   .bar .seg{flex:1;background:var(--rule);opacity:.45}
   .bar .seg.lit{opacity:1;background:var(--ink)}
   .tk{display:flex;align-items:baseline;gap:9px;padding:4px 0;
       border-bottom:1px solid var(--rule)}
   .tk:last-child{border-bottom:none}
-  .tk .mk{width:13px;color:var(--soft)}
-  .tk .tid{width:44px;color:var(--soft);font-size:11px}
+  .tk .mk{width:15px;color:var(--soft)}
+  .tk .tid{width:50px;color:var(--soft);font-size:13px}
   .tk .ttl{flex:1}
   .tk.done{color:var(--soft)}
   .tk.done .ttl{text-decoration:line-through}
   .tk.doing .mk{color:var(--ink);font-weight:600}
   .tk.blocked .mk{color:var(--alert)}
   .tk.next .ttl{font-weight:600}
-  .val{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
+  .val{font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
 
   /* questions */
   .q{border-left:3px solid var(--alert);padding:7px 0 7px 11px;margin-bottom:9px}
@@ -1692,16 +2114,16 @@ DASH_HTML = r"""<!DOCTYPE html>
   li{padding:3px 0;border-bottom:1px solid var(--rule);display:flex;
      justify-content:space-between;gap:12px}
   li:last-child{border-bottom:none}
-  .t{color:var(--soft);font-size:11px;white-space:nowrap}
-  .scroll{max-height:250px;overflow-y:auto}
-  .tag{display:inline-block;padding:1px 6px;font-size:10px;letter-spacing:.08em;
+  .t{color:var(--soft);font-size:12.5px;white-space:nowrap}
+  .scroll{max-height:290px;overflow-y:auto}
+  .tag{display:inline-block;padding:1px 7px;font-size:11px;letter-spacing:.08em;
        text-transform:uppercase;border:1px solid currentColor;margin-right:7px}
   .g-claude{color:var(--claude)} .g-gemini{color:var(--gemini)} .g-codex{color:var(--codex)}
-  pre{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:0;
-      color:var(--soft);max-height:220px;overflow-y:auto}
-  .stamp{color:var(--soft);font-size:10px;letter-spacing:.1em;margin-top:26px;
+  pre{white-space:pre-wrap;font-family:var(--mono);font-size:14px;margin:0;
+      color:var(--soft);max-height:250px;overflow-y:auto}
+  .stamp{color:var(--soft);font-size:11.5px;letter-spacing:.1em;margin-top:26px;
          text-align:right;text-transform:uppercase}
-  .flag{display:inline-block;padding:2px 8px;font-size:10px;letter-spacing:.1em;
+  .flag{display:inline-block;padding:3px 9px;font-size:11.5px;letter-spacing:.1em;
         text-transform:uppercase;font-weight:600}
   .flag.draft{background:var(--alert);color:var(--ground)}
   .flag.appr{border:1px solid var(--rule);color:var(--soft)}
@@ -1718,6 +2140,11 @@ DASH_HTML = r"""<!DOCTYPE html>
   <div class="rail" id="rail"></div>
 
   <div class="grid">
+    <div class="panel span2" id="budgetpanel">
+      <h2>Subscription budget <span class="qcount" id="budgetflag"></span></h2>
+      <div id="budget"></div>
+    </div>
+
     <div class="panel span2" id="roadpanel" style="display:none">
       <h2>Roadmap <span class="qcount" id="roadpct"></span></h2>
       <div class="road">
@@ -1765,6 +2192,22 @@ const SEGS = 24;
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const clock = ts => ts ? new Date(ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '-';
 
+function ago(seconds){
+  if (seconds === null || seconds === undefined) return 'never';
+  if (seconds < 60) return seconds + 's ago';
+  if (seconds < 3600) return Math.round(seconds / 60) + 'm ago';
+  if (seconds < 86400) return Math.round(seconds / 3600) + 'h ago';
+  return Math.round(seconds / 86400) + 'd ago';
+}
+
+function fmtHours(h){
+  if (h === null || h === undefined) return '--';
+  if (h >= 24) return Math.floor(h / 24) + 'd ' + Math.round(h % 24) + 'h';
+  const mins = Math.round(h * 60);
+  return mins >= 60 ? Math.floor(mins / 60) + 'h ' + String(mins % 60).padStart(2, '0') + 'm'
+                    : mins + 'm';
+}
+
 function meter(used, budget){
   const frac = budget > 0 ? Math.min(used / budget, 1) : 0;
   const lit = Math.round(frac * SEGS);
@@ -1789,19 +2232,66 @@ async function tick(){
     `<div class="ph ${i === at ? 'on' : (i < at ? 'done' : '')}">${esc(g)}${
       g === 'review' && d.review_round ? ' ' + d.review_round : ''}</div>`).join('');
 
+  const STATE_LABEL = {live:'live', idle:'idle', cold:'not running',
+                       missing:'not installed', never:'never used'};
   document.getElementById('agents').innerHTML = Object.entries(d.agents).map(([n, a]) => `
-    <div class="agent c-${n}">
+    <div class="agent c-${n} s-${esc(a.state || 'never')}">
       <div class="arow">
-        <span class="aname">${esc(n)}</span>
-        <span class="ameta">${esc(a.model)} &middot; effort ${esc(a.effort)}</span>
+        <span class="aname"><span class="dot"></span>${esc(n)}</span>
+        <span class="state">${STATE_LABEL[a.state] || ''}${
+          a.state === 'idle' || a.state === 'cold' ? ' &middot; ' + ago(a.idle_seconds) : ''}</span>
       </div>
-      <div class="ameta">${esc(a.role)}</div>
+      <div class="ameta">${esc(a.model)} &middot; effort ${esc(a.effort)} &middot; ${esc(a.role)}</div>
       <div class="meter">${meter(a.tokens, a.budget)}</div>
       <div class="anum">
-        <span>${a.calls} calls &middot; ${a.seconds}s</span>
-        <span>${a.tokens.toLocaleString()} / ${a.budget.toLocaleString()} tok</span>
+        <span>${a.calls} calls &middot; ${a.seconds}s &middot; ${
+          a.measured ? 'measured' : 'self-reported'}</span>
+        <span>${a.tokens.toLocaleString()} / ${a.budget.toLocaleString()} tok today</span>
       </div>
     </div>`).join('');
+
+  const u = d.usage || {};
+  const bflag = document.getElementById('budgetflag');
+  if (!u.available) {
+    bflag.textContent = '';
+    document.getElementById('budget').innerHTML =
+      `<div class="none">${esc(u.reason || 'No measured Claude usage yet.')}</div>`;
+  } else {
+    const w = u.window, k = u.week, s = u.session;
+    const tight = w.percent >= 80 || k.percent >= 80;
+    bflag.textContent = tight ? 'running low' : '';
+    document.getElementById('budget').innerHTML = `
+      <div class="budget">
+        <div class="${tight ? 'warn' : ''}">
+          <div class="cap">${u.window_hours}h window &middot; resets in ${
+            fmtHours(w.resets_in_hours)}</div>
+          <div class="big">${w.percent.toFixed(1)}%</div>
+          <div class="meter">${meter(w.weighted, w.limit)}</div>
+          <div class="anum"><span>${w.weighted.toLocaleString()} used</span>
+            <span>${w.limit.toLocaleString()} cap</span></div>
+        </div>
+        <div class="${k.percent >= 80 ? 'warn' : ''}">
+          <div class="cap">this week</div>
+          <div class="big">${k.percent.toFixed(1)}%</div>
+          <div class="meter">${meter(k.weighted, k.limit)}</div>
+          <div class="anum"><span>${k.weighted.toLocaleString()} used</span>
+            <span>${k.limit.toLocaleString()} cap</span></div>
+        </div>
+        <div>
+          <div class="cap">headroom at ${u.burn_per_hour.toLocaleString()} tok/h</div>
+          <div class="big">${fmtHours(u.hours_left)}</div>
+          <div class="anum"><span>binding: ${esc(u.binding)} limit</span></div>
+          <div class="anum"><span>session: ${s.calls} calls &middot; ${
+            s.weighted.toLocaleString()} weighted</span></div>
+          <div class="anum"><span>raw ${s.total.toLocaleString()} tok &middot; cache read ${
+            s.cache_read.toLocaleString()}</span></div>
+        </div>
+      </div>
+      <div class="fine">Weighted tokens: output &times;${u.weights.output}, cache write &times;${
+        u.weights.cache_write}, cache read &times;${u.weights.cache_read}. Plan ${esc(u.plan)}
+        ceilings are estimates &mdash; correct them with
+        <code>usage --window-tokens N --weekly-tokens N</code>.</div>`;
+  }
 
   const road = document.getElementById('roadpanel');
   const GLYPH = {todo:'·', doing:'›', done:'×', blocked:'!'};
@@ -1859,7 +2349,7 @@ async function tick(){
   document.getElementById('statusmd').textContent = d.status_md || 'STATUS.md is empty.';
   document.getElementById('stamp').textContent = 'refreshed ' + new Date().toLocaleTimeString();
 }
-tick(); setInterval(tick, 3000);
+tick(); setInterval(tick, 2000);
 </script>
 </body>
 </html>
@@ -1987,6 +2477,16 @@ def main():
 
     p = sub.add_parser("status", help="text summary")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("usage", help="measured token spend and subscription headroom")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--plan", choices=sorted(PLAN_LIMITS),
+                   help="apply a plan preset to the ceilings")
+    p.add_argument("--window-tokens", type=int,
+                   help="correct the rolling-window ceiling (weighted tokens)")
+    p.add_argument("--weekly-tokens", type=int,
+                   help="correct the weekly ceiling (weighted tokens)")
+    p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser("dash", help="web dashboard")
     p.add_argument("--port", type=int, default=7777)
