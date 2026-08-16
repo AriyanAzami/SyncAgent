@@ -191,3 +191,68 @@ class TestTopics(TableCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfigMigration(TableCase):
+    """A table made before a seat existed must still gain that seat."""
+
+    def write_cfg(self, cfg):
+        from syncagent.util import write_json
+        write_json(self.root / TABLE / "config.json", cfg)
+
+    def old_config(self):
+        return {
+            "version": "2.0",
+            "auto_relay": True,
+            "max_hops": 3,
+            "seats": {
+                "gemini": {"cmd": "gemini", "depth": "deep", "role": "research",
+                           "order": 1, "enabled": True, "scribe": False},
+                "claude": {"cmd": "claude", "depth": "light", "role": "judgment",
+                           "order": 2, "enabled": True, "scribe": True},
+            },
+        }
+
+    def test_a_seat_added_after_the_table_was_made_still_appears(self):
+        self.write_cfg(self.old_config())
+        cfg = T.load_config(self.root)
+        self.assertIn("antigravity", cfg["seats"])
+        self.assertIn("antigravity", T.seat_order(cfg))
+
+    def test_the_withdrawn_gemini_seat_is_stood_down_with_a_reason(self):
+        self.write_cfg(self.old_config())
+        cfg = T.load_config(self.root)
+        self.assertFalse(cfg["seats"]["gemini"]["enabled"])
+        self.assertIn("free tier", cfg["seats"]["gemini"]["disabled_reason"])
+        self.assertNotIn("gemini", T.seat_order(cfg))
+
+    def test_the_migration_is_written_back_so_it_runs_once(self):
+        self.write_cfg(self.old_config())
+        T.load_config(self.root)
+        from syncagent.util import read_json
+        on_disk = read_json(self.root / TABLE / "config.json")
+        self.assertEqual(on_disk["version"], T.CONFIG_VERSION)
+        self.assertIn("antigravity", on_disk["seats"])
+
+    def test_it_never_overrides_a_choice_the_user_made(self):
+        cfg = self.old_config()
+        cfg["seats"]["claude"]["depth"] = "deep"
+        cfg["seats"]["claude"]["model"] = "opus"
+        cfg["max_hops"] = 9
+        self.write_cfg(cfg)
+        out = T.load_config(self.root)
+        self.assertEqual(out["seats"]["claude"]["depth"], "deep")
+        self.assertEqual(out["seats"]["claude"]["model"], "opus")
+        self.assertEqual(out["max_hops"], 9)
+
+    def test_a_gemini_seat_the_user_re_enabled_survives_a_reload(self):
+        # Once migrated, re-enabling gemini by hand must stick - the migration
+        # runs on the version bump, not on every load.
+        self.write_cfg(self.old_config())
+        T.load_config(self.root)
+        from syncagent.util import read_json, write_json
+        cur = read_json(self.root / TABLE / "config.json")
+        cur["seats"]["gemini"]["enabled"] = True
+        write_json(self.root / TABLE / "config.json", cur)
+        again = T.load_config(self.root)
+        self.assertTrue(again["seats"]["gemini"]["enabled"])

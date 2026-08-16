@@ -125,6 +125,9 @@ def table_dir(root):
     return Path(root) / TABLE
 
 
+CONFIG_VERSION = "2.1"
+
+
 def default_config():
     """The shape written on first run.
 
@@ -133,7 +136,7 @@ def default_config():
     something to react to.
     """
     return {
-        "version": "2.0",
+        "version": CONFIG_VERSION,
         "created": now_iso(),
         "auto_relay": True,
         "max_hops": 3,
@@ -189,16 +192,70 @@ def default_config():
     }
 
 
-def load_config(root):
-    cfg = read_json(table_dir(root) / "config.json", default_config())
+def migrate_config(cfg):
+    """Bring an existing config up to the current shape. (cfg, changed, notes).
+
+    An existing table used to be frozen at whatever the defaults were the day it
+    was created: seats added later never appeared in it, so a table made before
+    Antigravity existed kept trying to run the withdrawn Gemini CLI forever.
+    A config on disk is the user's, so this only ever *adds* what is missing and
+    turns off a seat that is known not to work - it never re-enables, reorders
+    or renames anything the user has set.
+    """
     base = default_config()
+    notes = []
+    changed = False
+
     for key, value in base.items():
-        cfg.setdefault(key, value)
+        if key not in cfg:
+            cfg[key] = value
+            changed = True
+
+    seats = cfg.setdefault("seats", {})
     for name, seat in base["seats"].items():
-        if name in cfg.get("seats", {}):
+        if name not in seats:
+            seats[name] = dict(seat)
+            changed = True
+            if seat.get("enabled", True):
+                notes.append(f"added the '{name}' seat")
+        else:
             merged = dict(seat)
-            merged.update(cfg["seats"][name])
-            cfg["seats"][name] = merged
+            merged.update(seats[name])
+            seats[name] = merged
+
+    if cfg.get("version") != CONFIG_VERSION:
+        # 2.0 -> 2.1: Google withdrew the Gemini CLI's individual free tier, so
+        # a `gemini` seat left enabled sits at the front of the relay and fails
+        # every topic. Stand it down in favour of the seat that replaced it,
+        # and say so rather than doing it silently.
+        gem = seats.get("gemini")
+        if (gem and gem.get("enabled")
+                and seats.get("antigravity", {}).get("enabled")):
+            gem["enabled"] = False
+            gem["disabled_reason"] = (
+                "Google withdrew the Gemini CLI's individual free tier. Set "
+                "GEMINI_API_KEY or GOOGLE_CLOUD_PROJECT and set enabled back to "
+                "true if you have a paid plan.")
+            notes.append("stood down the 'gemini' seat, which can no longer answer")
+        cfg["version"] = CONFIG_VERSION
+        changed = True
+
+    return cfg, changed, notes
+
+
+def load_config(root, save=True):
+    path = table_dir(root) / "config.json"
+    stored = read_json(path, None)
+    if not isinstance(stored, dict):
+        return default_config()
+    cfg, changed, notes = migrate_config(stored)
+    if changed and save:
+        try:
+            write_json(path, cfg)
+            if notes:
+                print(f"table/config.json updated: {'; '.join(notes)}.")
+        except OSError:
+            pass
     return cfg
 
 
