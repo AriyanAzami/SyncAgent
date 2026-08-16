@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import syncagent as sa  # noqa: E402
+import syncagent.usage as usage  # noqa: E402
 
 
 def turn(minutes_ago, msg_id, session="S1", inp=100, out=200,
@@ -46,23 +47,22 @@ class TranscriptCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "ws"
-        (self.root / sa.ORCH).mkdir(parents=True)
+        (self.root / sa.TABLE).mkdir(parents=True)
         self.projects = Path(self.tmp.name) / "projects"
         self.transcripts = self.projects / sa.project_slug(self.root)
         self.transcripts.mkdir(parents=True)
-        self._real_projects = sa.CLAUDE_PROJECTS
-        sa.CLAUDE_PROJECTS = self.projects
+        self._real_projects = usage.CLAUDE_PROJECTS
+        usage.CLAUDE_PROJECTS = self.projects
 
     def tearDown(self):
-        sa.CLAUDE_PROJECTS = self._real_projects
+        usage.CLAUDE_PROJECTS = self._real_projects
         self.tmp.cleanup()
 
     def write(self, name, lines):
         (self.transcripts / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def config(self, **limits):
-        base = {"agents": {"claude": {"model": "opus", "budget_tokens_per_day": 1}},
-                "limits": dict(sa.DEFAULT_LIMITS)}
+        base = {"limits": dict(sa.DEFAULT_LIMITS)}
         base["limits"].update(limits)
         return base
 
