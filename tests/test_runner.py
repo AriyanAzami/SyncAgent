@@ -89,32 +89,32 @@ class RunnerCase(unittest.TestCase):
 
 class TestSequencing(RunnerCase):
     def test_the_plan_runs_in_order_and_each_turn_writes_a_file(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="claude"),
+        fake = FakeSeats({"antigravity": turn_text("G", to="claude"),
                           "claude": turn_text("C", to="none")})
         topic = self.run_topic(fake)
         ran = [c["seat"] for c in fake.calls]
-        self.assertEqual(ran[:2], ["gemini", "claude"])
+        self.assertEqual(ran[:2], ["antigravity", "claude"])
         for step in topic["steps"]:
             if step["status"] == "done":
                 self.assertTrue(
                     (T.topic_dir(self.root, topic["id"]) / step["file"]).exists())
 
     def test_none_ends_the_topic_and_skips_the_rest_of_the_plan(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="none")})
+        fake = FakeSeats({"antigravity": turn_text("G", to="none")})
         topic = self.run_topic(fake)
         self.assertEqual(topic["status"], "answered")
-        self.assertEqual([c["seat"] for c in fake.calls], ["gemini"])
+        self.assertEqual([c["seat"] for c in fake.calls], ["antigravity"])
         self.assertTrue(any(s["status"] == "skipped" for s in topic["steps"]))
 
     def test_user_pauses_the_relay_without_skipping_anything(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="user")})
+        fake = FakeSeats({"antigravity": turn_text("G", to="user")})
         topic = self.run_topic(fake)
         self.assertEqual(topic["status"], "waiting")
         self.assertEqual(len(fake.calls), 1)
         self.assertTrue(any(s["status"] == "queued" for s in topic["steps"]))
 
     def test_a_failed_turn_stops_the_chain_and_keeps_the_reason(self):
-        fake = FakeSeats({"gemini": RuntimeError("not signed in")})
+        fake = FakeSeats({"antigravity": RuntimeError("not signed in")})
         topic = self.run_topic(fake)
         first = topic["steps"][0]
         self.assertEqual(first["status"], "failed")
@@ -125,21 +125,21 @@ class TestSequencing(RunnerCase):
 class TestHandoffs(RunnerCase):
     def test_a_handoff_off_the_plan_inserts_a_detour_then_rejoins(self):
         fake = FakeSeats({
-            "gemini": turn_text("G", to="codex", job="settle the licence question"),
+            "antigravity": turn_text("G", to="codex", job="settle the licence question"),
             "codex": turn_text("X", to="claude"),
             "claude": turn_text("C", to="none"),
         })
         topic = self.run_topic(fake, steps=[
-            {"seat": "gemini", "job": "research", "depth": "deep"},
+            {"seat": "antigravity", "job": "research", "depth": "deep"},
             {"seat": "claude", "job": "critique", "depth": "light"},
         ])
-        self.assertEqual([c["seat"] for c in fake.calls], ["gemini", "codex", "claude"])
+        self.assertEqual([c["seat"] for c in fake.calls], ["antigravity", "codex", "claude"])
         inserted = [s for s in topic["steps"] if s.get("inserted_after")]
         self.assertEqual(len(inserted), 1)
         self.assertEqual(inserted[0]["job"], "settle the licence question")
 
     def test_handing_to_the_next_planned_seat_is_not_counted_as_a_detour(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="claude"),
+        fake = FakeSeats({"antigravity": turn_text("G", to="claude"),
                           "claude": turn_text("C", to="none")})
         topic = self.run_topic(fake)
         self.assertEqual(topic["hops"], 0)
@@ -149,18 +149,18 @@ class TestHandoffs(RunnerCase):
         cfg["max_hops"] = 2
         cfg["auto_answer"] = False
         T.save_config(self.root, cfg)
-        fake = FakeSeats({"gemini": turn_text("G", to="codex"),
-                          "codex": turn_text("X", to="gemini"),
-                          "claude": turn_text("C", to="gemini")})
+        fake = FakeSeats({"antigravity": turn_text("G", to="codex"),
+                          "codex": turn_text("X", to="antigravity"),
+                          "claude": turn_text("C", to="antigravity")})
         topic = self.run_topic(fake, steps=[
-            {"seat": "gemini", "job": "research", "depth": "deep"}])
+            {"seat": "antigravity", "job": "research", "depth": "deep"}])
         self.assertLessEqual(topic["hops"], 2)
         self.assertLessEqual(len(fake.calls), 4)
 
     def test_a_handoff_to_an_unknown_seat_stops_rather_than_guessing(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="mistral")})
+        fake = FakeSeats({"antigravity": turn_text("G", to="mistral")})
         topic = self.run_topic(fake, steps=[
-            {"seat": "gemini", "job": "research", "depth": "deep"}])
+            {"seat": "antigravity", "job": "research", "depth": "deep"}])
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(topic["steps"][0]["handoff"]["unknown_seat"], "mistral")
 
@@ -169,7 +169,7 @@ class TestGuarantees(RunnerCase):
     def test_only_one_seat_is_ever_alive_at_a_time(self):
         # The whole token argument rests on this. A delay makes any overlap
         # detectable rather than theoretical.
-        fake = FakeSeats({"gemini": turn_text("G", to="claude"),
+        fake = FakeSeats({"antigravity": turn_text("G", to="claude"),
                           "claude": turn_text("C", to="codex"),
                           "codex": turn_text("X", to="none")}, delay=0.12)
         R.S.run_seat = fake
@@ -186,20 +186,20 @@ class TestGuarantees(RunnerCase):
         self.assertEqual(fake.max_live, 1)
 
     def test_only_the_scribe_is_given_write_access(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="claude"),
+        fake = FakeSeats({"antigravity": turn_text("G", to="claude"),
                           "claude": turn_text("C", to="none")})
         self.run_topic(fake)
         writable = {c["seat"]: c["writable"] for c in fake.calls}
         self.assertTrue(writable["claude"])
-        self.assertFalse(writable["gemini"])
+        self.assertFalse(writable["antigravity"])
 
     def test_depth_controls_what_the_next_seat_is_actually_sent(self):
         fake = FakeSeats({
-            "gemini": turn_text("SECRET-DEEP-DETAIL", to="claude"),
+            "antigravity": turn_text("SECRET-DEEP-DETAIL", to="claude"),
             "claude": turn_text("C", to="none"),
         })
         self.run_topic(fake, steps=[
-            {"seat": "gemini", "job": "research", "depth": "deep"},
+            {"seat": "antigravity", "job": "research", "depth": "deep"},
             {"seat": "claude", "job": "critique", "depth": "light"},
         ])
         claude_prompt = [c for c in fake.calls if c["seat"] == "claude"][0]["prompt"]
@@ -220,27 +220,129 @@ class TestGuarantees(RunnerCase):
         self.assertNotIn("already done the deep pass", first)
 
     def test_a_shallow_seat_following_a_deep_one_is_told_not_to_repeat_it(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="claude"),
+        fake = FakeSeats({"antigravity": turn_text("G", to="claude"),
                           "claude": turn_text("C", to="none")})
         self.run_topic(fake, steps=[
-            {"seat": "gemini", "job": "research", "depth": "deep"},
+            {"seat": "antigravity", "job": "research", "depth": "deep"},
             {"seat": "claude", "job": "critique", "depth": "light"}])
         claude_prompt = [c for c in fake.calls if c["seat"] == "claude"][0]["prompt"]
         self.assertIn("already done the deep pass", claude_prompt)
 
     def test_a_resumed_seat_is_not_sent_the_brief_again(self):
-        fake = FakeSeats({"gemini": turn_text("G", to="gemini"),
+        fake = FakeSeats({"antigravity": turn_text("G", to="antigravity"),
                           "claude": turn_text("C", to="none")})
         topic = self.run_topic(fake, steps=[
-            {"seat": "gemini", "job": "research", "depth": "deep"},
-            {"seat": "gemini", "job": "go deeper", "depth": "deep"},
+            {"seat": "antigravity", "job": "research", "depth": "deep"},
+            {"seat": "antigravity", "job": "go deeper", "depth": "deep"},
         ])
-        calls = [c for c in fake.calls if c["seat"] == "gemini"]
+        calls = [c for c in fake.calls if c["seat"] == "antigravity"]
         self.assertGreaterEqual(len(calls), 2)
         self.assertIn("## The need", calls[0]["prompt"])
         self.assertNotIn("## The need", calls[1]["prompt"])
-        self.assertEqual(calls[1]["session"], "gemini-session")
+        self.assertEqual(calls[1]["session"], "antigravity-session")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAntigravityAdapter(unittest.TestCase):
+    """The agy CLI's own quirks, without launching it."""
+
+    def test_the_prompt_is_capped_because_it_rides_on_the_command_line(self):
+        # agy -p takes the prompt as an argv value and Windows caps a command
+        # line at 32,767 chars, so an uncapped deep turn would look like an
+        # unrelated crash.
+        self.assertLess(S.AGY_PROMPT_CAP, 32767)
+
+    def test_the_json_reply_is_parsed_into_the_common_turn_shape(self):
+        seen = {}
+
+        def fake_run(cmd, prompt, cwd, timeout):
+            seen["cmd"] = cmd
+            out = ('{"conversation_id":"abc-123","status":"SUCCESS",'
+                   '"response":"the answer","duration_seconds":3.0,"num_turns":1,'
+                   '"usage":{"input_tokens":100,"output_tokens":20,'
+                   '"thinking_tokens":5,"cache_read_tokens":7,"total_tokens":127}}')
+
+            class P:
+                returncode = 0
+            return P(), out, ""
+
+        real, S._run = S._run, fake_run
+        try:
+            turn = S.run_antigravity("hello", ".", {"cmd": "agy", "model": "m"})
+        finally:
+            S._run = real
+
+        self.assertTrue(turn.ok)
+        self.assertEqual(turn["text"], "the answer")
+        self.assertEqual(turn["session"], "abc-123")
+        self.assertEqual(turn["tokens"]["in"], 100)
+        self.assertEqual(turn["tokens"]["cache_read"], 7)
+        self.assertEqual(turn["tokens"]["total"], 127)
+        # -p must stay last: it consumes whatever argument follows it.
+        self.assertEqual(seen["cmd"][-2], "-p")
+
+    def test_an_advisory_seat_gets_plan_mode_and_the_scribe_gets_edits(self):
+        seen = []
+
+        def fake_run(cmd, prompt, cwd, timeout):
+            seen.append(cmd)
+
+            class P:
+                returncode = 0
+            return P(), '{"conversation_id":"x","status":"SUCCESS","response":"ok"}', ""
+
+        real, S._run = S._run, fake_run
+        try:
+            S.run_antigravity("hi", ".", {"cmd": "agy"}, writable=False)
+            S.run_antigravity("hi", ".", {"cmd": "agy"}, writable=True)
+        finally:
+            S._run = real
+        # read-only is the sandbox, not plan mode: plan refuses every tool,
+        # so a research seat could not open table/inputs/ at all.
+        self.assertIn("--sandbox", seen[0])
+        self.assertNotIn("accept-edits", seen[0])
+        self.assertIn("accept-edits", seen[1])
+        self.assertNotIn("--sandbox", seen[1])
+
+    def test_an_empty_response_is_a_failure_with_a_usable_reason(self):
+        # status SUCCESS with an empty response is how plan mode reports that
+        # the model reached for a tool it may not use.
+        def fake_run(cmd, prompt, cwd, timeout):
+            class P:
+                returncode = 0
+            return P(), '{"conversation_id":"x","status":"SUCCESS","response":""}', ""
+
+        real, S._run = S._run, fake_run
+        try:
+            turn = S.run_antigravity("hi", ".", {"cmd": "agy"})
+        finally:
+            S._run = real
+        self.assertFalse(turn.ok)
+        self.assertIn("empty response", turn["error"])
+
+
+class TestAnswerTiming(RunnerCase):
+    def test_waiting_on_a_human_with_nothing_queued_still_gets_a_synthesis(self):
+        # Two finished turns and an empty queue is the end of the chain even
+        # though a human was asked a question. Leaving ANSWER.md unwritten
+        # makes the reader parse raw turns to find the conclusion.
+        cfg = T.load_config(self.root)
+        cfg["auto_answer"] = True
+        T.save_config(self.root, cfg)
+        fake = FakeSeats({"antigravity": turn_text("G", to="claude"),
+                          "claude": turn_text("C", to="user")})
+        topic = self.run_topic(fake)
+        self.assertEqual(topic["status"], "waiting")
+        self.assertTrue((T.topic_dir(self.root, topic["id"]) / "ANSWER.md").exists())
+
+    def test_waiting_with_work_still_queued_does_not_synthesise_early(self):
+        cfg = T.load_config(self.root)
+        cfg["auto_answer"] = True
+        T.save_config(self.root, cfg)
+        fake = FakeSeats({"antigravity": turn_text("G", to="user")})
+        topic = self.run_topic(fake)
+        self.assertEqual(topic["status"], "waiting")
+        self.assertFalse((T.topic_dir(self.root, topic["id"]) / "ANSWER.md").exists())

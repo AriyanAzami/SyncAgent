@@ -138,13 +138,26 @@ def default_config():
         "auto_relay": True,
         "max_hops": 3,
         "seats": {
+            # Google withdrew the Gemini CLI's individual free tier, so the
+            # research chair is Antigravity's `agy` running a Gemini model.
+            # The plain `gemini` seat below still works if you have an API key
+            # or a paid Code Assist plan - enable it there.
+            "antigravity": {
+                "cmd": "agy",
+                "model": "gemini-3.1-pro-high",
+                "depth": "deep",
+                "role": "research and evidence",
+                "order": 1,
+                "enabled": True,
+                "scribe": False,
+            },
             "gemini": {
                 "cmd": "gemini",
                 "model": "",
                 "depth": "deep",
                 "role": "research and evidence",
                 "order": 1,
-                "enabled": True,
+                "enabled": False,
                 "scribe": False,
             },
             "claude": {
@@ -424,6 +437,18 @@ def section(markdown, heading):
 
 HANDOFF_FIELD = re.compile(r"^\s*[-*]?\s*(to|job|why)\s*:\s*(.*?)\s*$", re.I | re.M)
 
+# What a seat is likely to call another seat, versus what the config calls it.
+# A handoff that names the binary instead of the seat is a naming quibble, not
+# a refusal, so it should not cost a turn.
+SEAT_ALIASES = {
+    "agy": "antigravity",
+    "antigrav": "antigravity",
+    "gemini3": "antigravity",
+    "claudecode": "claude",
+    "openai": "codex",
+    "gpt": "codex",
+}
+
 
 def parse_handoff(markdown, known_seats=()):
     """The `## Handoff` block at the end of a turn, as a dict.
@@ -452,7 +477,12 @@ def parse_handoff(markdown, known_seats=()):
     if to in ("none", "user", "human", "me"):
         handoff["to"] = "user" if to != "none" else "none"
         handoff["dispatchable"] = False
-    elif known_seats and to not in known_seats:
+        return handoff
+
+    if to not in (known_seats or ()) and to in SEAT_ALIASES:
+        to = handoff["to"] = SEAT_ALIASES[to]
+
+    if known_seats and to not in known_seats:
         handoff["unknown_seat"] = to
         handoff["to"] = "user"
         handoff["dispatchable"] = False

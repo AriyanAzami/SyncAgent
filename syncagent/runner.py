@@ -180,6 +180,12 @@ class Runner:
             if to == "user":
                 topic["status"] = "waiting"
                 T.save_topic(self.root, topic)
+                # Waiting on a human is still the end of the chain when nothing
+                # is left to run. Without this the table goes quiet holding two
+                # finished turns and no synthesis, and the person who asked has
+                # to read the raw turns to find out what it concluded.
+                if not any(s["status"] == "queued" for s in topic["steps"]):
+                    self._maybe_answer(topic_id, cfg)
                 return
 
             # Order is list position, not `n`. `n` is a stable id that ends up

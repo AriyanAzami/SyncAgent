@@ -1,6 +1,6 @@
-# SyncAgent workspace state — machine-local, not source
-.syncagent/telemetry.jsonl
-.syncagent/refs/
+# A table is machine-local working state, not source. Topics, turns, telemetry
+# and the seat config all live in here, and none of it belongs in the project.
+table/
 
 # Claude Code local overrides
 .claude/settings.local.json

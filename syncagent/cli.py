@@ -12,6 +12,7 @@ from .usage import PLAN_LIMITS, claude_usage_report
 from .util import TABLE, fmt_hours, have, meter_bar, now_iso, write_json
 
 SEAT_HELP = {
+    "antigravity": "https://antigravity.google  (the `agy` CLI)",
     "claude": "https://docs.claude.com/en/docs/claude-code/setup",
     "gemini": "https://github.com/google-gemini/gemini-cli",
     "codex": "https://github.com/openai/codex",
@@ -33,7 +34,11 @@ def make_table(root, quiet=False):
     if not cfg_path.exists():
         cfg = T.default_config()
         for name, seat in cfg["seats"].items():
-            seat["enabled"] = have(seat["cmd"])
+            # A missing binary disables a seat, but a seat the defaults turned
+            # off stays off - `gemini` ships disabled because its individual
+            # free tier was withdrawn, and finding the binary is not evidence
+            # that it can answer.
+            seat["enabled"] = seat.get("enabled", True) and have(seat["cmd"])
         write_json(cfg_path, cfg)
 
     turn = td / "prompts" / "turn.md"
@@ -75,8 +80,13 @@ def make_table(root, quiet=False):
             },
         })
 
+    # Ignore the whole table, not selected files inside it.
+    #
+    # A table created in a git repo otherwise fills `git status` with topic
+    # folders and turn files - your working state, not the project's source.
+    # Anyone who does want to share a table can still `git add -f` it.
     gi = root / ".gitignore"
-    entries = [f"{TABLE}/telemetry.jsonl", f"{TABLE}/health.json", f"{TABLE}/inputs/"]
+    entries = [f"{TABLE}/"]
     existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
     missing = [e for e in entries if e not in existing]
     if missing:
@@ -98,12 +108,12 @@ def wizard(start=None):
     print()
     print("  Seats found on this machine:")
     found = 0
-    for name in ("claude", "gemini", "codex"):
-        if have(name):
+    for name in ("antigravity", "claude", "codex"):
+        if have(T.default_config()["seats"][name]["cmd"]):
             found += 1
-            print(f"    {name:<8} ready")
+            print(f"    {name:<12} ready")
         else:
-            print(f"    {name:<8} not installed   {SEAT_HELP[name]}")
+            print(f"    {name:<12} not installed   {SEAT_HELP[name]}")
     print()
     if not found:
         print("  None of the three CLIs are installed, so no seat could answer.")
@@ -195,15 +205,15 @@ def cmd_doctor(args):
     worst = 0
     for name, seat in (cfg.get("seats") or {}).items():
         if not seat.get("enabled", True):
-            print(f"  {name:<8} disabled in config.json")
+            print(f"  {name:<12} disabled in config.json")
             continue
         r = S.check_seat(name, seat, root)
         results[name] = r
         if r["state"] == "ready":
-            print(f"  {name:<8} ready      {r.get('detail', '')}")
+            print(f"  {name:<12} ready   {r.get('detail', '')}")
         else:
             worst = 1
-            print(f"  {name:<8} {r['state'].upper():<10} {r['detail']}")
+            print(f"  {name:<12} {r['state'].upper():<7} {r['detail']}")
     write_json(health_path(root), {"checked": now_iso(), "seats": results})
     if worst:
         print("\nA blocked seat still shows on the dashboard - it just cannot take a turn.")

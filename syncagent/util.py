@@ -39,20 +39,51 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+# Where a CLI installs itself when it does not put itself on PATH.
+# Antigravity's `agy` is the current example: it ships an `agy install`
+# subcommand to edit your shell profile, so a freshly installed and fully
+# logged-in CLI is invisible to `which` until you run that and open a new
+# terminal. Looking in its own install directory costs nothing and removes a
+# confusing "not installed" for a tool the user can plainly see working.
+EXTRA_BIN_DIRS = {
+    "agy": [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin",
+        Path.home() / ".agy" / "bin",
+        Path.home() / ".local" / "bin",
+        Path("/usr/local/bin"),
+    ],
+}
+
+
+def find_binary(name):
+    """Full path to a CLI, or None. Checks PATH first, then known homes."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in EXTRA_BIN_DIRS.get(name, []):
+        try:
+            for candidate in (d / name, d / f"{name}.exe", d / f"{name}.cmd"):
+                if candidate.is_file():
+                    return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def have(binary):
-    return shutil.which(binary) is not None
+    return find_binary(binary) is not None
 
 
 def exe(binary):
     """Resolve a CLI to a full path before launching it.
 
-    On Windows the three CLIs are npm shims - `gemini.CMD`, not `gemini.exe`.
-    shutil.which() finds them because it honours PATHEXT, but CreateProcess
-    only ever appends `.exe` when it searches PATH, so passing the bare name
-    to subprocess raises FileNotFoundError on a machine where the CLI is
-    plainly installed. Hand it the resolved path instead.
+    On Windows several of these CLIs are npm shims - `gemini.CMD`, not
+    `gemini.exe`. shutil.which() finds them because it honours PATHEXT, but
+    CreateProcess only ever appends `.exe` when it searches PATH, so passing
+    the bare name to subprocess raises FileNotFoundError on a machine where the
+    CLI is plainly installed. Hand it the resolved path instead.
     """
-    return shutil.which(binary) or binary
+    return find_binary(binary) or binary
 
 
 def cli_invocation():

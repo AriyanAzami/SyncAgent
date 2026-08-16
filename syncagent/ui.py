@@ -10,6 +10,7 @@ PAGE = r"""<!DOCTYPE html>
   :root{
     --ground:#EDEFEA; --panel:#F6F7F3; --ink:#1B211E; --soft:#5C6660;
     --rule:#C7CDC3; --claude:#3B5E4A; --gemini:#2E5C8A; --codex:#7A6A2F;
+    --antigravity:#6B4A7A;
     --alert:#A8392B; --live:#3B5E4A;
     --mono:"JetBrains Mono","Cascadia Code","SF Mono",ui-monospace,Menlo,
            "DejaVu Sans Mono",Consolas,monospace;
@@ -19,6 +20,7 @@ PAGE = r"""<!DOCTYPE html>
   @media (prefers-color-scheme:dark){
     :root{--ground:#141815;--panel:#1C211D;--ink:#E4E8E2;--soft:#8D968F;
           --rule:#333A35;--claude:#7FB394;--gemini:#7CA9D6;--codex:#C4B26A;
+          --antigravity:#B592C4;
           --alert:#E0705E;--live:#7FB394;}
   }
   *{box-sizing:border-box}
@@ -67,6 +69,7 @@ PAGE = r"""<!DOCTYPE html>
     100%{box-shadow:0 0 0 0 rgba(127,179,148,0)}}
   .c-claude .sname{color:var(--claude)} .c-gemini .sname{color:var(--gemini)}
   .c-codex .sname{color:var(--codex)}
+  .c-antigravity .sname{color:var(--antigravity)}
   .smeta{font-size:12.5px;color:var(--soft)}
   .warnbox{border-left:3px solid var(--alert);padding:7px 0 7px 10px;margin-top:8px;
            font-size:12.5px;color:var(--alert)}
@@ -97,6 +100,7 @@ PAGE = r"""<!DOCTYPE html>
   .tag{display:inline-block;padding:1px 7px;font-size:10.5px;letter-spacing:.08em;
        text-transform:uppercase;border:1px solid currentColor}
   .g-claude{color:var(--claude)} .g-gemini{color:var(--gemini)} .g-codex{color:var(--codex)}
+  .g-antigravity{color:var(--antigravity)}
   .job{flex:1;min-width:180px}
   .tiny{font-size:11.5px;color:var(--soft)}
   .arrow{color:var(--soft);font-size:12px;padding:3px 0 6px 13px}

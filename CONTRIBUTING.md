@@ -25,7 +25,8 @@ The code is now a package, and cloning-and-running is unchanged. Keep modules fo
 | `syncagent/prompts.py` | the turn templates |
 
 CLI-specific weirdness belongs in `seats.py`. Nothing above that file should know that
-Gemini calls it `--approval-mode` and Codex calls it `--sandbox`.
+Antigravity spells read-only `--sandbox`, Codex spells it `--sandbox read-only`, and
+Claude spells it `--permission-mode dontAsk`.
 
 ## Before you open a PR
 
@@ -50,8 +51,10 @@ Two portability traps, both already handled — please don't reintroduce them:
 
 - Launch CLIs through `exe()`, never a bare name. On Windows the three CLIs are npm
   shims (`gemini.CMD`), which `shutil.which` finds but `CreateProcess` will not run.
-- Prompts go over **stdin**, never argv. A brief plus prior turns will exceed `ARG_MAX`
-  eventually, and that failure looks like an unrelated crash.
+- Prompts go over **stdin** wherever the CLI allows it. A brief plus prior turns will
+  exceed `ARG_MAX` eventually, and that failure looks like an unrelated crash. `agy` is
+  the exception — it takes the prompt as an argv value and ignores stdin — which is why
+  that adapter caps the prompt instead.
 
 ## Things that look arbitrary and are not
 
@@ -74,6 +77,15 @@ PR what got worse when you tried.
 - **`doctor` makes a real call.** A seat can be on PATH, logged in, and still unable to
   answer — Gemini's withdrawn free tier is exactly this. Only a real call distinguishes
   "installed" from "works".
+- **Antigravity's read-only mode is `--sandbox`, not `--mode plan`.** plan mode refuses
+  every tool, so a research seat cannot even open `table/inputs/` and returns an empty
+  response. The sandbox reads fine and silently drops writes — checked by hand, because
+  it is a security claim.
+- **`agy -p` puts the prompt on the command line.** It does not read stdin, and Windows
+  caps a command line at 32,767 characters, so `AGY_PROMPT_CAP` truncates with a visible
+  marker rather than crashing in a way that looks unrelated.
+- **A seat disabled in the defaults stays disabled** when its binary exists. `gemini`
+  ships off; finding the binary is not evidence it can answer.
 - **The turn file is written before the handoff is parsed.** A turn that produced work
   must leave it on disk even if the handoff is malformed.
 

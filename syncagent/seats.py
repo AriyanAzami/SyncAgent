@@ -5,9 +5,10 @@ id that lets the next turn skip re-sending everything. The three CLIs disagree
 about output format, about flags, and about what a session even is, so the
 disagreement is quarantined here and nothing above this file knows about it.
 
-Prompts always go over **stdin**, never argv. A brief plus prior turns will
-exceed ARG_MAX eventually, and that failure looks like an unrelated crash
-rather than a size problem.
+Prompts go over **stdin** wherever the CLI allows it. A brief plus prior turns
+will exceed ARG_MAX eventually, and that failure looks like an unrelated crash
+rather than a size problem. `agy` is the one exception - it takes the prompt as
+an argv value and ignores stdin - so that adapter caps the prompt instead.
 """
 
 import json
@@ -72,6 +73,9 @@ AUTH_PATTERNS = (
      "The CLI's credentials were rejected. Check its API key or re-run its login."),
     (re.compile(r"quota|rate.?limit|429|resource[_ ]exhausted", re.I),
      "That CLI is out of quota right now. Try a different seat, or wait."),
+    (re.compile(r"permission that headless mode cannot prompt for", re.I),
+     "This seat tried to use a tool it is not allowed in read-only mode. Give it "
+     "reasoning work, or make it the scribe if it genuinely needs to touch files."),
 )
 
 
@@ -236,6 +240,94 @@ def _parse_gemini(stdout):
 
 
 # --------------------------------------------------------------------------
+# antigravity (agy)
+# --------------------------------------------------------------------------
+#
+# Google withdrew the Gemini CLI's individual free tier and pointed people at
+# Antigravity instead, so `agy` is now the practical way to put a Gemini model
+# at the table. It is shaped like Claude Code - `-p`, `--output-format json`,
+# `--mode plan`, `--conversation <id>` - with two differences that matter.
+
+# `agy -p` takes the prompt as the flag's *value*; it does not read stdin. That
+# puts the whole prompt on the command line, and Windows caps a command line at
+# 32,767 characters, so a deep turn carrying three earlier turns would fail as
+# an unrelated-looking crash. Truncating deliberately, with a visible marker, is
+# the honest version of that limit.
+AGY_PROMPT_CAP = 28_000
+
+
+def run_antigravity(prompt, cwd, seat, session=None, writable=False,
+                    timeout=DEFAULT_TIMEOUT):
+    if len(prompt) > AGY_PROMPT_CAP:
+        prompt = (prompt[:AGY_PROMPT_CAP]
+                  + f"\n\n[truncated at {AGY_PROMPT_CAP:,} characters - this seat "
+                    f"receives its prompt on the command line, which is capped]")
+
+    # Read-only here is `--sandbox`, not `--mode plan`.
+    #
+    # plan mode refuses *every* tool, so a research seat cannot even open the
+    # files in table/inputs/ - it just returns an empty response. `--sandbox`
+    # is the one that matches what an advisory seat needs: verified locally, it
+    # reads a file happily and a write silently produces nothing. The
+    # skip-permissions flag is required alongside it because headless mode
+    # cannot show an approval prompt, so without it every tool is auto-denied;
+    # the sandbox, not the prompt, is what contains this seat.
+    cmd = [exe(seat.get("cmd") or "agy"), "--output-format", "json",
+           "--dangerously-skip-permissions"]
+    if writable:
+        cmd += ["--mode", "accept-edits"]
+    else:
+        cmd += ["--sandbox"]
+    if seat.get("model"):
+        cmd += ["--model", seat["model"]]
+    if seat.get("effort"):
+        cmd += ["--effort", seat["effort"]]
+    if session:
+        cmd += ["--conversation", session]
+    cmd += ["--print-timeout", f"{int(timeout)}s"]
+    cmd += ["-p", prompt]   # must stay last: -p consumes the next argument
+
+    started = time.time()
+    proc, out, err = _run(cmd, "", cwd, timeout)
+    elapsed = int((time.time() - started) * 1000)
+    if proc is None:
+        return _turn(False, error=err, elapsed=elapsed)
+
+    data = None
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and '"conversation_id"' in line:
+            try:
+                data = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+    if data is None:
+        return _fail(err, out, proc.returncode, elapsed)
+
+    text = (data.get("response") or "").strip()
+    if not text:
+        # `status: SUCCESS` with an empty response is how plan mode reports
+        # that the model reached for a tool it is not allowed to use.
+        return _turn(False, elapsed=elapsed, session=data.get("conversation_id"),
+                     error=diagnose(err, out) or
+                     "Antigravity returned nothing. It reports SUCCESS with an empty "
+                     "response when a tool it reached for was denied.")
+
+    u = data.get("usage") or {}
+    tokens = {
+        "in": int(u.get("input_tokens") or 0),
+        "out": int(u.get("output_tokens") or 0),
+        "cache_read": int(u.get("cache_read_tokens") or 0),
+        "cache_write": 0,
+    }
+    tokens["total"] = int(u.get("total_tokens") or sum(tokens.values()))
+    return _turn(True, text=text, tokens=tokens,
+                 session=data.get("conversation_id"),
+                 model=seat.get("model") or "antigravity", elapsed=elapsed)
+
+
+# --------------------------------------------------------------------------
 # codex
 # --------------------------------------------------------------------------
 
@@ -307,7 +399,8 @@ def _parse_codex(stdout):
 # dispatch
 # --------------------------------------------------------------------------
 
-ADAPTERS = {"claude": run_claude, "gemini": run_gemini, "codex": run_codex}
+ADAPTERS = {"claude": run_claude, "gemini": run_gemini, "codex": run_codex,
+            "antigravity": run_antigravity}
 
 
 def run_seat(name, seat, prompt, cwd, session=None, writable=False,

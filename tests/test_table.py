@@ -44,6 +44,19 @@ class TestHandoff(unittest.TestCase):
         self.assertEqual(h["unknown_seat"], "mistral")
         self.assertFalse(h["dispatchable"])
 
+    def test_a_seat_named_by_its_binary_is_still_dispatched(self):
+        # A seat that writes "agy" rather than "antigravity" is quibbling about
+        # a name, not refusing - it should not cost a turn.
+        h = T.parse_handoff("## Handoff\nto: agy\njob: research it\nwhy: web",
+                            {"antigravity", "claude"})
+        self.assertEqual(h["to"], "antigravity")
+        self.assertTrue(h["dispatchable"])
+
+    def test_an_alias_never_overrides_a_seat_that_really_exists(self):
+        h = T.parse_handoff("## Handoff\nto: gpt\njob: x\nwhy: y",
+                            {"gpt", "claude"})
+        self.assertEqual(h["to"], "gpt")
+
     def test_no_handoff_section_yields_nothing_rather_than_a_guess(self):
         self.assertIsNone(T.parse_handoff("## Findings\n\njust findings", SEATS))
 
@@ -161,6 +174,15 @@ class TestTopics(TableCase):
         brief = (T.topic_dir(self.root, topic["id"]) / "BRIEF.md").read_text(encoding="utf-8")
         self.assertIn("resume.pdf", brief)
         self.assertIn("TRUTH CONSTRAINT", brief)
+
+    def test_the_research_chair_is_antigravity_and_gemini_ships_disabled(self):
+        # Google withdrew the Gemini CLI's individual free tier, so a seat that
+        # merely has the binary must not be put in the relay by default.
+        cfg = T.default_config()
+        self.assertIn("antigravity", T.seat_order(cfg))
+        self.assertNotIn("gemini", T.seat_order(cfg))
+        self.assertEqual(cfg["seats"]["antigravity"]["cmd"], "agy")
+        self.assertEqual(cfg["seats"]["antigravity"]["depth"], "deep")
 
     def test_an_unknown_lens_falls_back_rather_than_crashing(self):
         topic = T.create_topic(self.root, "x", lens="nonsense")

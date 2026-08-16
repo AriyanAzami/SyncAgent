@@ -42,11 +42,10 @@ python sync.py doctor
 ```
 
 ```
-  gemini   BLOCKED    Gemini's free CLI tier has been withdrawn for individual
-                      accounts. Set GEMINI_API_KEY (from aistudio.google.com/apikey)
-                      or GOOGLE_CLOUD_PROJECT, then retry.
-  claude   ready      claude-opus-5
-  codex    ready      codex
+  antigravity  ready   gemini-3.1-pro-high
+  gemini       disabled in config.json
+  claude       ready   claude-opus-5
+  codex        ready   codex
 ```
 
 **2. Put your material on the table.** Anything the agents should read goes in
@@ -68,7 +67,7 @@ python sync.py ask "How is my resume for this posting? Both are in table/inputs/
 
 ```
 table/001-how-is-my-resume/
-  01-gemini-research.md      what the posting really asks for
+  01-antigravity-research.md what the posting really asks for
   02-claude-critique.md      the judgment, and where the resume falls short
   ANSWER.md                  the synthesis — read this one
 table/out/
@@ -125,10 +124,10 @@ Say you drop this on the table:
 > How is my resume for the Northwind posting? Both files are in `table/inputs/`.
 
 ```
-you ──▶ gemini            researches the company and the posting, deep, with web
-          │               writes 01-gemini-research.md
+you ──▶ antigravity       reads both files, researches deep
+          │               writes 01-antigravity-research.md
           ▼
-        claude            reads only Gemini's findings — not its whole turn.
+        claude            reads only Antigravity's findings — not its whole turn.
           │               Adds judgment, rewrites the resume into table/out/
           │               writes 02-claude-critique.md
           ▼
@@ -136,8 +135,8 @@ you ──▶ gemini            researches the company and the posting, deep, wi
 ```
 
 Nobody re-reads the posting. Nobody pastes anything. Claude never sees the research
-Gemini did to reach its conclusions — only the conclusions, because that is all it needs
-to disagree with them.
+Antigravity did to reach its conclusions — only the conclusions, because that is all it
+needs to disagree with them.
 
 Every step leaves a file you can open. Nothing is hidden in a chat history.
 
@@ -153,7 +152,7 @@ table/
   001-how-is-my-resume/
     NEED.md                  what you asked, verbatim
     BRIEF.md                 the shared context every seat reads. Capped
-    01-gemini-research.md    one file per turn
+    01-antigravity-…-.md     one file per turn
     02-claude-critique.md
     ANSWER.md                the synthesis you actually read
     topic.json               who did what, what it cost, who they handed to
@@ -164,17 +163,25 @@ mid-run, edit it, and the next agent will read what you wrote.
 
 ## Seats
 
-| Seat | Default job | Depth | Writes files? |
-|---|---|---|---|
-| **Gemini** | research and evidence | `deep` | no |
-| **Claude** | judgment and critique | `light` | **yes — the scribe** |
-| **Codex** | tiebreak, on request | `glance` | no |
+| Seat | CLI | Default job | Depth | Writes files? |
+|---|---|---|---|---|
+| **Antigravity** | `agy` | research and evidence | `deep` | no |
+| **Claude** | `claude` | judgment and critique | `light` | **yes — the scribe** |
+| **Codex** | `codex` | tiebreak, on request | `glance` | no |
+| **Gemini** | `gemini` | research and evidence | `deep` | no — *ships disabled* |
+
+Antigravity holds the research chair because Google withdrew the Gemini CLI's free tier
+for individual accounts. It runs a Gemini model (`gemini-3.1-pro-high` by default), so the
+deep-research seat is still a Gemini — just reached through `agy`. The plain `gemini` seat
+is still there and still works if you have an API key or a paid Code Assist plan; enable
+it in `table/config.json`.
 
 You can reorder them, change any depth, or hand a job to one seat directly.
 
-**Advisory seats genuinely cannot write.** They are launched read-only — Gemini with
-`--approval-mode plan`, Codex with `--sandbox read-only` — so it is enforced, not
-requested. Exactly one seat is the **scribe** and is the only one that can produce a real
+**Advisory seats genuinely cannot write.** They are launched sandboxed — Antigravity with
+`--sandbox`, Codex with `--sandbox read-only`, Claude with `--permission-mode dontAsk` —
+so it is enforced, not requested. Verified on a real run: a sandboxed seat reads
+`table/inputs/` happily, and a write silently produces no file. Exactly one seat is the **scribe** and is the only one that can produce a real
 deliverable in `table/out/`. Without a scribe, nobody is doing the work; with three,
 they overwrite each other.
 
@@ -291,9 +298,13 @@ yourself and it uses whatever you're already paying for:
 
 | CLI | Install |
 |---|---|
+| Antigravity (`agy`) | https://antigravity.google |
 | Claude Code | https://docs.claude.com/en/docs/claude-code/setup |
-| Gemini CLI | https://github.com/google-gemini/gemini-cli |
 | Codex CLI | https://github.com/openai/codex |
+| Gemini CLI *(optional)* | https://github.com/google-gemini/gemini-cli |
+
+`agy` does not always put itself on your PATH — it ships an `agy install` subcommand for
+that. SyncAgent looks in its install directory anyway, so it works either way.
 
 **One is enough to start.** With two you get the cross-check that is the point of the
 tool. Missing seats are simply disabled.
@@ -350,9 +361,19 @@ reads files only from inside a topic folder, and the filename is pattern-checked
 ## Troubleshooting
 
 **Gemini fails with `IneligibleTierError`** — Google withdrew the free Gemini CLI tier for
-individual accounts. Set `GEMINI_API_KEY` from
-[aistudio.google.com/apikey](https://aistudio.google.com/apikey), or `GOOGLE_CLOUD_PROJECT`
-for a paid Code Assist plan. `doctor` will tell you this too.
+individual accounts, which is why the `gemini` seat ships disabled and Antigravity holds
+the research chair instead. If you want the `gemini` seat back, set `GEMINI_API_KEY` from
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey) or `GOOGLE_CLOUD_PROJECT`
+for a paid Code Assist plan, then enable it in `table/config.json`.
+
+**An Antigravity turn returns nothing** — it reports `SUCCESS` with an empty response when
+a tool it reached for was denied. Give that seat reasoning work, or make it the scribe if
+it genuinely needs to write.
+
+**A very long Antigravity prompt gets truncated** — `agy -p` takes the prompt as a
+command-line argument rather than on stdin, and Windows caps a command line at 32,767
+characters, so prompts are capped at 28,000 with a visible marker. Only a `deep` seat
+carrying several earlier turns gets near it.
 
 **A seat is "not on your PATH"** — check with `which claude gemini codex` (PowerShell:
 `Get-Command claude, gemini, codex`). SyncAgent runs Python, not the CLIs; you install
