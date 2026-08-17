@@ -1,17 +1,17 @@
-"""Unit tests for the measured-usage engine - transcript parsing, weighting,
-window arithmetic and liveness.
+"""Unit tests for the limits gauge.
 
-Writes a synthetic transcript tree under a temp dir and points the module at it,
-so nothing here touches a real ~/.claude. Run from the repo root:
+The gauge no longer estimates anything: it runs `claude -p /usage` and reads the
+answer. So what is worth testing is the parser - every shape of that report we
+have seen, plus the shapes that mean "ask failed" - and the once-a-minute cache
+in front of it. Nothing here launches a real CLI.
+
+Run from the repo root:
 
     python -m unittest discover -s tests
 """
 
-import json
 import sys
-import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -19,149 +19,100 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import syncagent as sa  # noqa: E402
 import syncagent.usage as usage  # noqa: E402
 
+REPORT = """You are currently using your subscription to power your Claude Code usage
 
-def turn(minutes_ago, msg_id, session="S1", inp=100, out=200,
-         cache_write=0, cache_read=0):
-    ts = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
-    return json.dumps({
-        "type": "assistant",
-        "timestamp": ts.isoformat().replace("+00:00", "Z"),
-        "sessionId": session,
-        "requestId": "req_" + msg_id,
-        "message": {
-            "id": msg_id,
-            "model": "claude-opus-5",
-            "usage": {
-                "input_tokens": inp,
-                "output_tokens": out,
-                "cache_creation_input_tokens": cache_write,
-                "cache_read_input_tokens": cache_read,
-            },
-        },
-    })
+Current session: 5% used · resets Aug 16, 10:30pm (America/Toronto)
+Current week (all models): 17% used · resets Aug 22, 7am (America/Toronto)
+
+What's contributing to your limits usage?
+Approximate, based on local sessions on this machine.
+
+Last 24h · 266 requests · 16 sessions
+  55% of your usage was at >150k context
+"""
 
 
-class TranscriptCase(unittest.TestCase):
-    """A workspace whose transcripts we control line by line."""
+class TestParser(unittest.TestCase):
+    def test_the_session_line_is_the_five_hour_window(self):
+        r = sa.parse_usage(REPORT)
+        self.assertTrue(r["available"])
+        self.assertEqual(r["window"]["percent"], 5.0)
+        self.assertEqual(r["window"]["resets"], "Aug 16, 10:30pm (America/Toronto)")
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "ws"
-        (self.root / sa.TABLE).mkdir(parents=True)
-        self.projects = Path(self.tmp.name) / "projects"
-        self.transcripts = self.projects / sa.project_slug(self.root)
-        self.transcripts.mkdir(parents=True)
-        self._real_projects = usage.CLAUDE_PROJECTS
-        usage.CLAUDE_PROJECTS = self.projects
+    def test_the_week_line_is_kept_with_its_own_label(self):
+        r = sa.parse_usage(REPORT)
+        self.assertEqual(len(r["weeks"]), 1)
+        self.assertEqual(r["weeks"][0]["label"], "week (all models)")
+        self.assertEqual(r["weeks"][0]["percent"], 17.0)
 
-    def tearDown(self):
-        usage.CLAUDE_PROJECTS = self._real_projects
-        self.tmp.cleanup()
+    def test_a_plan_with_two_week_limits_reports_both(self):
+        r = sa.parse_usage(
+            "Current session: 1% used · resets Aug 16, 10:30pm\n"
+            "Current week (all models): 12% used · resets Aug 22, 7am\n"
+            "Current week (Opus): 44% used · resets Aug 22, 7am\n")
+        self.assertEqual([k["percent"] for k in r["weeks"]], [12.0, 44.0])
 
-    def write(self, name, lines):
-        (self.transcripts / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    def test_the_prose_lines_around_it_are_not_mistaken_for_limits(self):
+        # "55% of your usage was at >150k context" is a behaviour breakdown, not
+        # a ceiling, and counting it as one would double the gauge.
+        r = sa.parse_usage(REPORT)
+        self.assertIsNone(next((b for b in r["weeks"] if b["percent"] == 55.0), None))
 
-    def config(self, **limits):
-        base = {"limits": dict(sa.DEFAULT_LIMITS)}
-        base["limits"].update(limits)
-        return base
+    def test_a_fractional_percent_survives(self):
+        r = sa.parse_usage("Current session: 7.5% used · resets tomorrow")
+        self.assertEqual(r["window"]["percent"], 7.5)
 
+    def test_a_line_without_a_reset_clause_still_parses(self):
+        r = sa.parse_usage("Current session: 3% used")
+        self.assertEqual(r["window"]["percent"], 3.0)
+        self.assertEqual(r["window"]["resets"], "")
 
-class TestParsing(TranscriptCase):
-    def test_weighting_follows_the_configured_prices(self):
-        self.write("a.jsonl", [turn(1, "m1", inp=1000, out=100,
-                                    cache_write=400, cache_read=10000)])
-        rec = sa.read_claude_usage(self.root)[0]
-        # 1000*1 + 100*5 + 400*1.25 + 10000*0.1 = 3000
-        self.assertEqual(rec["weighted"], 3000)
-        self.assertEqual(rec["total"], 11500)
+    def test_a_plain_hyphen_separator_parses_too(self):
+        # Not every console can encode a middle dot.
+        r = sa.parse_usage("Current session: 9% used - resets Aug 16, 10:30pm")
+        self.assertEqual(r["window"]["resets"], "Aug 16, 10:30pm")
 
-    def test_a_call_repeated_across_transcripts_is_counted_once(self):
-        # Resuming a session copies earlier turns into the new file.
-        self.write("a.jsonl", [turn(9, "m1"), turn(8, "m2")])
-        self.write("b.jsonl", [turn(8, "m2"), turn(7, "m3")])
-        self.assertEqual(len(sa.read_claude_usage(self.root)), 3)
+    def test_an_answer_that_is_not_a_usage_report_is_unavailable(self):
+        r = sa.parse_usage("I don't see a question here.")
+        self.assertFalse(r["available"])
+        self.assertIn("reason", r)
+        self.assertIsNone(r["window"])
+        self.assertEqual(r["weeks"], [])
 
-    def test_non_assistant_and_malformed_lines_are_skipped(self):
-        self.write("a.jsonl", [
-            turn(1, "m1"),
-            json.dumps({"type": "user", "message": {"usage": {"input_tokens": 9}}}),
-            '{"type": "assistant", "message": {"usage": broken',
-            json.dumps({"type": "assistant", "timestamp": "not-a-date",
-                        "message": {"id": "m9", "usage": {"input_tokens": 5}}}),
-        ])
-        self.assertEqual(len(sa.read_claude_usage(self.root)), 1)
-
-    def test_no_transcripts_reports_unavailable_rather_than_zero(self):
-        report = sa.claude_usage_report(self.root, self.config())
-        self.assertFalse(report["available"])
-        self.assertIn("reason", report)
+    def test_empty_output_is_unavailable_rather_than_zero_percent(self):
+        self.assertFalse(sa.parse_usage("")["available"])
 
 
-class TestWindows(TranscriptCase):
-    def test_only_the_rolling_window_counts_against_the_window_limit(self):
-        self.write("a.jsonl", [turn(60 * 9, "old", out=1000),   # 9h back, expired
-                               turn(30, "new", out=1000)])
-        r = sa.claude_usage_report(self.root, self.config(window_hours=5,
-                                                          window_tokens=100000))
-        self.assertEqual(r["window"]["calls"], 1)
-        self.assertEqual(r["week"]["calls"], 2)
-
-    def test_percent_and_remaining_track_the_ceiling(self):
-        self.write("a.jsonl", [turn(10, "m1", inp=0, out=1000, cache_read=0)])
-        r = sa.claude_usage_report(self.root, self.config(window_tokens=10000))
-        self.assertEqual(r["window"]["weighted"], 5000)
-        self.assertEqual(r["window"]["percent"], 50.0)
-        self.assertEqual(r["window"]["remaining"], 5000)
-        self.assertFalse(r["window"]["over"])
-
-    def test_going_over_the_ceiling_clamps_the_meter_but_flags_it(self):
-        self.write("a.jsonl", [turn(10, "m1", inp=0, out=1000)])
-        r = sa.claude_usage_report(self.root, self.config(window_tokens=1000))
-        self.assertEqual(r["window"]["percent"], 100.0)
-        self.assertEqual(r["window"]["remaining"], 0)
-        self.assertTrue(r["window"]["over"])
-        self.assertEqual(r["hours_left"], 0.0)
-
-    def test_the_window_resets_five_hours_after_its_first_call(self):
-        self.write("a.jsonl", [turn(120, "m1")])
-        r = sa.claude_usage_report(self.root, self.config(window_hours=5))
-        self.assertAlmostEqual(r["window"]["resets_in_hours"], 3.0, places=1)
-
-    def test_headroom_comes_from_the_binding_limit(self):
-        self.write("a.jsonl", [turn(30, "m1", inp=0, out=1000),
-                               turn(10, "m2", inp=0, out=1000)])
-        r = sa.claude_usage_report(self.root, self.config(window_tokens=20000,
-                                                          weekly_tokens=11000))
-        self.assertEqual(r["binding"], "week")
-        # 10000 weighted burned in the last hour, 1000 left on the week
-        self.assertEqual(r["burn_per_hour"], 10000)
-        self.assertAlmostEqual(r["hours_left"], 0.1, places=2)
-
-    def test_the_live_session_is_the_one_that_spoke_last(self):
-        self.write("a.jsonl", [turn(200, "m1", session="OLD"),
-                               turn(5, "m2", session="NEW"),
-                               turn(4, "m3", session="NEW")])
-        r = sa.claude_usage_report(self.root, self.config())
-        self.assertEqual(r["session"]["id"], "NEW")
-        self.assertEqual(r["session"]["calls"], 2)
+class TestAsk(unittest.TestCase):
+    def test_a_missing_claude_says_so_instead_of_raising(self):
+        r = sa.ask_claude(Path.cwd(), cmd="definitely-not-a-real-cli")
+        self.assertFalse(r["available"])
+        self.assertIn("PATH", r["reason"])
 
 
-class TestLimits(unittest.TestCase):
-    def test_a_plan_name_supplies_both_ceilings(self):
-        limits = sa.resolve_limits({"limits": {"plan": "max-20x"}})
-        self.assertEqual(limits["window_tokens"], sa.PLAN_LIMITS["max-20x"]["window"])
-        self.assertEqual(limits["weekly_tokens"], sa.PLAN_LIMITS["max-20x"]["weekly"])
+class TestMeter(unittest.TestCase):
+    def test_the_first_report_is_a_placeholder_not_a_blank_gauge(self):
+        m = sa.UsageMeter(Path.cwd())
+        self.assertFalse(m.report()["available"])
+        self.assertIn("Asking", m.report()["reason"])
 
-    def test_an_explicit_ceiling_overrides_the_plan(self):
-        limits = sa.resolve_limits({"limits": {"plan": "pro", "window_tokens": 7}})
-        self.assertEqual(limits["window_tokens"], 7)
-        self.assertEqual(limits["weekly_tokens"], sa.PLAN_LIMITS["pro"]["weekly"])
+    def test_the_page_reads_the_cache_and_never_the_cli(self):
+        m = sa.UsageMeter(Path.cwd())
+        calls = []
 
-    def test_an_empty_config_still_yields_usable_defaults(self):
-        limits = sa.resolve_limits({})
-        self.assertTrue(limits["window_tokens"] > 0)
-        self.assertEqual(limits["weights"]["output"], 5.0)
+        def fake_ask(root, cmd, **kw):
+            calls.append(cmd)
+            return usage.parse_usage(REPORT)
+
+        real, usage.ask_claude = usage.ask_claude, fake_ask
+        try:
+            m._report = usage.ask_claude(m.root, m.cmd)
+            for _ in range(50):
+                m.report()
+        finally:
+            usage.ask_claude = real
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(m.report()["window"]["percent"], 5.0)
 
 
 class TestLiveness(unittest.TestCase):

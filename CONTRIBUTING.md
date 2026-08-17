@@ -19,7 +19,7 @@ The code is now a package, and cloning-and-running is unchanged. Keep modules fo
 | `syncagent/table.py` | the folder model — topics, briefs, handoff parsing, depth slicing |
 | `syncagent/seats.py` | the CLI adapters, and every quirk of their flags and JSON |
 | `syncagent/runner.py` | the single-worker relay |
-| `syncagent/usage.py` | measured Claude spend |
+| `syncagent/usage.py` | Claude's own limit report, asked and cached |
 | `syncagent/server.py` | dashboard HTTP and API |
 | `syncagent/ui.py` | the page |
 | `syncagent/prompts.py` | the turn templates |

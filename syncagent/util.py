@@ -114,13 +114,6 @@ def strip_fences(text):
     return m.group(1).strip() if m else t
 
 
-def fmt_hours(hours):
-    if hours is None:
-        return "unknown"
-    h, m = int(hours), int(round((hours - int(hours)) * 60))
-    return f"{h}h {m:02d}m" if h else f"{m}m"
-
-
 def meter_bar(percent, width=28):
     lit = int(round(min(percent, 100) / 100 * width))
     return "[" + "#" * lit + "." * (width - lit) + "]"

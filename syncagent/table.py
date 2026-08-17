@@ -125,7 +125,7 @@ def table_dir(root):
     return Path(root) / TABLE
 
 
-CONFIG_VERSION = "2.1"
+CONFIG_VERSION = "2.2"
 
 
 def default_config():
@@ -183,12 +183,6 @@ def default_config():
                 "scribe": False,
             },
         },
-        "limits": {
-            "plan": "max-5x",
-            "window_hours": 5,
-            "window_tokens": 10_000_000,
-            "weekly_tokens": 125_000_000,
-        },
     }
 
 
@@ -237,6 +231,14 @@ def migrate_config(cfg):
                 "GEMINI_API_KEY or GOOGLE_CLOUD_PROJECT and set enabled back to "
                 "true if you have a paid plan.")
             notes.append("stood down the 'gemini' seat, which can no longer answer")
+
+        # 2.1 -> 2.2: the budget gauge asks `claude -p /usage` for the real
+        # percentages instead of weighting tokens against a guessed ceiling, so
+        # the hand-tuned limits nobody could verify are no longer read by
+        # anything. Leaving dead knobs in a config file is its own kind of lie.
+        if cfg.pop("limits", None) is not None:
+            notes.append("dropped the guessed token ceilings - Claude is asked directly now")
+
         cfg["version"] = CONFIG_VERSION
         changed = True
 

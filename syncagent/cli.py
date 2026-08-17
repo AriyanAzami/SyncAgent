@@ -8,8 +8,8 @@ from . import prompts as P
 from . import seats as S
 from . import table as T
 from .server import health_path, serve
-from .usage import PLAN_LIMITS, claude_usage_report
-from .util import TABLE, fmt_hours, have, meter_bar, now_iso, write_json
+from .usage import ask_claude
+from .util import TABLE, have, meter_bar, now_iso, write_json
 
 SEAT_HELP = {
     "antigravity": "https://antigravity.google  (the `agy` CLI)",
@@ -221,52 +221,31 @@ def cmd_doctor(args):
 
 
 def cmd_usage(args):
+    """Ask Claude what is left. Costs nothing - /usage is a local command."""
     root = resolve_root(args.path, allow_wizard=False)
-    cfg = T.load_config(root)
-    if args.plan or args.window_tokens or args.weekly_tokens:
-        limits = dict(cfg.get("limits") or {})
-        if args.plan:
-            limits["plan"] = args.plan
-            preset = PLAN_LIMITS.get(args.plan)
-            if preset:
-                limits["window_tokens"] = preset["window"]
-                limits["weekly_tokens"] = preset["weekly"]
-        if args.window_tokens:
-            limits["window_tokens"] = args.window_tokens
-        if args.weekly_tokens:
-            limits["weekly_tokens"] = args.weekly_tokens
-        cfg["limits"] = limits
-        T.save_config(root, cfg)
-        print("limits updated in table/config.json")
-
-    u = claude_usage_report(root, cfg)
+    seat = (T.load_config(root).get("seats") or {}).get("claude") or {}
+    u = ask_claude(root, seat.get("cmd") or "claude")
     if args.json:
         import json
         print(json.dumps(u, indent=2))
         return
-    if not u.get("available"):
-        print(u.get("reason", "No measured Claude usage yet."))
+    if not u["available"]:
+        print(u["reason"])
         return
 
-    s, w, k = u["session"], u["window"], u["week"]
-    print(f"plan {u['plan']}  -  weighted tokens (output x{u['weights']['output']:g}, "
-          f"cache read x{u['weights']['cache_read']:g})")
+    window = u["window"]
+    if window:
+        print(f"{'5h window':<18} {meter_bar(window['percent'])} "
+              f"{window['percent']:>5.1f}%")
+        if window["resets"]:
+            print(f"{'':<18} resets {window['resets']}")
+    for week in u["weeks"]:
+        print(f"{week['label']:<18} {meter_bar(week['percent'])} "
+              f"{week['percent']:>5.1f}%")
+        if week["resets"]:
+            print(f"{'':<18} resets {week['resets']}")
     print()
-    print(f"this session   {s['calls']:>4} calls  {s['total']:>12,} raw  "
-          f"{s['weighted']:>12,} weighted")
-    print()
-    win_label = f"{u['window_hours']:g}h window"
-    print(f"{win_label:<14} {meter_bar(w['percent'])} {w['percent']:>5.1f}%"
-          f"   {w['weighted']:,} / {w['limit']:,}")
-    print(f"{'':<14} resets in {fmt_hours(w['resets_in_hours'])}")
-    print(f"{'7d window':<14} {meter_bar(k['percent'])} {k['percent']:>5.1f}%"
-          f"   {k['weighted']:,} / {k['limit']:,}")
-    print()
-    print(f"burn rate      {u['burn_per_hour']:,} weighted tok/hour")
-    print(f"headroom       {fmt_hours(u['hours_left'])} of work left "
-          f"(binding limit: {u['binding']})")
-    print()
-    print("Ceilings are estimates - Anthropic does not publish them in tokens.")
+    print("Asked of Claude itself, so these are the real numbers - not an estimate.")
 
 
 def cmd_setup(args):
@@ -324,11 +303,9 @@ def main(argv=None):
     p = sub.add_parser("doctor", parents=[common], help="check every seat with one tiny call")
     p.set_defaults(func=cmd_doctor)
 
-    p = sub.add_parser("usage", parents=[common], help="measured Claude spend and headroom")
+    p = sub.add_parser("usage", parents=[common],
+                       help="what Claude says is left of your limits")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--plan", choices=sorted(PLAN_LIMITS))
-    p.add_argument("--window-tokens", type=int)
-    p.add_argument("--weekly-tokens", type=int)
     p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser("setup", parents=[common], help="create table/ without opening the dashboard")

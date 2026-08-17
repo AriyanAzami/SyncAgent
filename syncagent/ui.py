@@ -119,17 +119,16 @@ PAGE = r"""<!DOCTYPE html>
   .answer{border-color:var(--live);border-left-width:3px}
 
   /* budget */
-  .budget{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-  @media(max-width:860px){.budget{grid-template-columns:1fr}}
-  .big{font-family:var(--serif);font-size:34px;line-height:1.1;letter-spacing:-.02em}
+  .big{font-family:var(--serif);font-size:40px;line-height:1.1;letter-spacing:-.02em}
   .cap{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft)}
   .warn .big{color:var(--alert)}
   .meter{display:flex;gap:2px;margin-top:7px;height:12px}
   .seg{flex:1;background:var(--rule);opacity:.45}
   .seg.lit{opacity:1;background:var(--ink)}
-  .anum{font-size:12px;color:var(--soft);margin-top:5px;display:flex;
-        justify-content:space-between;gap:10px}
-  .fine{font-size:11.5px;color:var(--soft);margin-top:11px;font-style:italic}
+  .warn .seg.lit{background:var(--alert)}
+  .week{margin-top:12px;padding-left:13px;border-left:2px solid var(--rule)}
+  .week .big{font-size:26px}
+  .fine{font-size:11.5px;color:var(--soft);margin-top:13px;font-style:italic}
   .stamp{color:var(--soft);font-size:11px;letter-spacing:.1em;margin-top:22px;
          text-align:right;text-transform:uppercase}
 </style>
@@ -175,7 +174,7 @@ PAGE = r"""<!DOCTYPE html>
       <div id="topics"></div>
 
       <div class="panel">
-        <h2>Claude budget <span id="budgetflag" style="color:var(--alert)"></span></h2>
+        <h2>Claude limits <span id="budgetflag" style="color:var(--alert)"></span></h2>
         <div id="budget"></div>
       </div>
     </div>
@@ -189,7 +188,7 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const clock = ts => ts ? new Date(ts).toLocaleTimeString([],
   {hour:'2-digit',minute:'2-digit'}) : '';
-let STATE = null, OPEN = {}, DOCS = {}, PLAN = null, BUSY = false;
+let STATE = null, OPEN = {}, DOCS = {}, PLAN = null, BUSY = false, WEEKS = false;
 
 function ago(s){
   if (s == null) return 'never';
@@ -198,14 +197,8 @@ function ago(s){
   if (s < 86400) return Math.round(s/3600) + 'h ago';
   return Math.round(s/86400) + 'd ago';
 }
-function fmtHours(h){
-  if (h == null) return '--';
-  if (h >= 24) return Math.floor(h/24) + 'd ' + Math.round(h%24) + 'h';
-  const m = Math.round(h*60);
-  return m >= 60 ? Math.floor(m/60) + 'h ' + String(m%60).padStart(2,'0') + 'm' : m + 'm';
-}
-function meter(used, cap){
-  const lit = cap > 0 ? Math.round(Math.min(used/cap,1)*SEGS) : 0;
+function meter(percent){
+  const lit = Math.round(Math.min(Math.max(percent,0),100)/100*SEGS);
   let out = '';
   for (let i = 0; i < SEGS; i++) out += '<div class="seg' + (i<lit?' lit':'') + '"></div>';
   return out;
@@ -319,9 +312,8 @@ function renderSeats(d){
           s.state==='idle'||s.state==='cold' ? ' &middot; '+ago(s.idle_seconds) : ''}</span>
       </div>
       <div class="smeta">${esc(s.role)}</div>
-      <div class="smeta">depth ${esc(s.depth)}${s.scribe?' &middot; scribe (writes files)':' &middot; advises only'}</div>
-      <div class="anum"><span>${s.turns} turns</span>
-        <span>${(s.tokens||0).toLocaleString()} tok</span></div>
+      <div class="smeta">depth ${esc(s.depth)}${s.scribe?' &middot; scribe (writes files)':' &middot; advises only'}
+        &middot; ${s.turns} turns</div>
       ${s.problem ? '<div class="warnbox">'+esc(s.problem)+'</div>' : ''}
     </div>`).join('');
 }
@@ -337,14 +329,13 @@ function renderQueue(d){
 }
 
 function turnRow(t, s){
-  const tok = (s.tokens && s.tokens.total) ? s.tokens.total.toLocaleString()+' tok' : '';
   const key = t.id + '/' + s.n;
   const open = DOCS[key];
   let html = `<div class="turn ${esc(s.status)}">
     <div class="thead2">
       <span class="tag g-${esc(s.seat)}">${esc(s.seat)}</span>
       <span class="job">${esc(s.job)}</span>
-      <span class="tiny">${esc(s.depth)}${tok?' &middot; '+tok:''} ${clock(s.finished)}</span>
+      <span class="tiny">${esc(s.depth)} ${clock(s.finished)}</span>
       ${s.file ? `<button class="ghost" data-doc="${esc(key)}" data-file="${esc(s.file)}"
          data-topic="${esc(t.id)}">${open?'hide':'read'} ${esc(s.file)}</button>` : ''}
       ${s.status==='queued'||s.status==='skipped'||s.status==='failed'
@@ -373,7 +364,6 @@ function renderTopics(d){
   document.getElementById('topics').innerHTML = d.topics.map(t => {
     const open = OPEN[t.id];
     const done = t.steps.filter(s => s.status === 'done').length;
-    const tok = t.steps.reduce((a,s) => a + ((s.tokens&&s.tokens.total)||0), 0);
     let body = '';
     if (open){
       body = `<div class="tbody"><div class="chain">${
@@ -391,8 +381,8 @@ function renderTopics(d){
       <div class="thead" data-open="${esc(t.id)}">
         <span class="tneed">${esc(t.need)}</span>
         <span class="tmeta">${esc(t.status)} &middot; ${esc(t.lens)} &middot; ${done}/${
-          t.steps.length} turns &middot; ${tok.toLocaleString()} tok${
-          t.answer ? ' &middot; answered' : ''}</span>
+          t.steps.length} turns${
+          t.answer && t.status !== 'answered' ? ' &middot; answered' : ''}</span>
       </div>${body}</div>`;
   }).join('');
 
@@ -424,45 +414,43 @@ function renderTopics(d){
   });
 }
 
+/* One gauge per limit Claude reports. Percentages, not token counts: the
+   percentage is the number the subscription is actually enforcing, and it is
+   the one Claude hands us. */
+function gauge(b, label, cls){
+  return `<div class="${cls||''}${b.percent>=80?' warn':''}">
+    <div class="cap">${esc(label)}</div>
+    <div class="big">${b.percent.toFixed(0)}% used</div>
+    <div class="meter">${meter(b.percent)}</div>
+    ${b.resets ? '<div class="tiny" style="margin-top:6px">resets '+esc(b.resets)+'</div>' : ''}
+  </div>`;
+}
+
 function renderBudget(d){
   const u = d.usage || {};
   const flag = document.getElementById('budgetflag');
+  const box = document.getElementById('budget');
   if (!u.available){
     flag.textContent = '';
-    document.getElementById('budget').innerHTML =
-      '<div class="none">' + esc(u.reason || 'No measured Claude usage yet.') + '</div>';
+    box.innerHTML = '<div class="none">' + esc(u.reason || 'Asking Claude...') + '</div>';
     return;
   }
-  const w = u.window, k = u.week, s = u.session;
-  const tight = w.percent >= 80 || k.percent >= 80;
-  flag.textContent = tight ? 'running low' : '';
-  document.getElementById('budget').innerHTML = `
-    <div class="budget">
-      <div class="${tight?'warn':''}">
-        <div class="cap">${u.window_hours}h window &middot; resets in ${fmtHours(w.resets_in_hours)}</div>
-        <div class="big">${w.percent.toFixed(1)}%</div>
-        <div class="meter">${meter(w.weighted,w.limit)}</div>
-        <div class="anum"><span>${w.weighted.toLocaleString()}</span>
-          <span>${w.limit.toLocaleString()}</span></div>
-      </div>
-      <div class="${k.percent>=80?'warn':''}">
-        <div class="cap">this week</div>
-        <div class="big">${k.percent.toFixed(1)}%</div>
-        <div class="meter">${meter(k.weighted,k.limit)}</div>
-        <div class="anum"><span>${k.weighted.toLocaleString()}</span>
-          <span>${k.limit.toLocaleString()}</span></div>
-      </div>
-      <div>
-        <div class="cap">headroom at ${u.burn_per_hour.toLocaleString()} tok/h</div>
-        <div class="big">${fmtHours(u.hours_left)}</div>
-        <div class="anum"><span>binding: ${esc(u.binding)}</span></div>
-        <div class="anum"><span>session ${s.calls} calls</span>
-          <span>${s.weighted.toLocaleString()} weighted</span></div>
-      </div>
-    </div>
-    <div class="fine">Weighted tokens: output &times;${u.weights.output}, cache read
-      &times;${u.weights.cache_read}. Plan ${esc(u.plan)} ceilings are estimates &mdash;
-      correct them in table/config.json.</div>`;
+  const w = u.window, weeks = u.weeks || [];
+  const worstWeek = weeks.reduce((a,k) => Math.max(a,k.percent), 0);
+  flag.textContent = Math.max(w ? w.percent : 0, worstWeek) >= 80 ? 'running low' : '';
+
+  box.innerHTML =
+    (w ? gauge(w, '5h window')
+       : '<div class="none">Claude reported no session window.</div>') +
+    (weeks.length ? `<div class="row">
+        <button class="ghost" id="weektoggle">${WEEKS ? '&#9662;' : '&#9656;'}
+          Weekly limit &middot; ${worstWeek.toFixed(0)}%</button>
+      </div>` + (WEEKS ? weeks.map(k => gauge(k, k.label, 'week')).join('') : '') : '') +
+    `<div class="fine">Asked of Claude itself once a minute &mdash;
+      last at ${clock(u.asked)}.</div>`;
+
+  const toggle = document.getElementById('weektoggle');
+  if (toggle) toggle.onclick = () => { WEEKS = !WEEKS; render(); };
 }
 
 function render(){

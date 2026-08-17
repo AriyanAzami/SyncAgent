@@ -229,10 +229,12 @@ Detours are capped (`max_hops`, default 3) so two agents cannot volley forever.
 - **Put a need on the table** — type it, pick a lens, send.
 - **Divide it up** — build the plan yourself: which seat, what depth, what job, in what
   order. Or leave it and the default relay runs.
-- **Seats** — who is live, what each has spent, and *why a seat can't run* if it can't.
+- **Seats** — who is live, how many turns each has taken, and *why a seat can't run* if
+  it can't.
 - **The chain** — every turn as a card you can expand and read, with handoff arrows
   between them.
-- **Claude budget** — measured, not guessed. See below.
+- **Claude limits** — the five-hour window, asked of Claude every minute. The weekly
+  limit is one click away. See below.
 - **The queue** — "gemini is working, 1 waiting". One seat at a time, visibly.
 
 ## Lenses
@@ -252,42 +254,32 @@ not invent. If a bullet can't be traced to your real resume, the agent must say 
 than write it. Inventing experience is the one failure here that actually costs someone
 an interview, so it's written into the prompt rather than left to good manners.
 
-## Claude's budget is measured, not self-reported
+## Claude's limits come from Claude
 
-Claude Code writes every assistant turn, with the exact usage the API returned, to
-`~/.claude/projects/<slug>/<session>.jsonl`. SyncAgent reads that file directly.
+`/usage` is a local slash command, so `claude -p /usage` answers off the same meter the
+app itself draws: no API call, no tokens, about a quarter of a second. The dashboard asks
+once a minute and shows what comes back.
 
 ```bash
 python sync.py usage
 ```
 
 ```
-plan max-5x  -  weighted tokens (output x5, cache read x0.1)
-
-this session     30 calls     2,341,498 raw       432,925 weighted
-
-5h window      [######......................]  23.2%   2,317,591 / 10,000,000
-               resets in 3h 51m
-7d window      [#...........................]   1.9%   2,317,591 / 125,000,000
-
-burn rate      1,840,931 weighted tok/hour
-headroom       4h 10m of work left (binding limit: window)
+5h window          [####........................]  13.0%
+                   resets Aug 16, 10:29pm (America/Toronto)
+week (all models)  [#####.......................]  17.0%
+                   resets Aug 22, 6:59am (America/Toronto)
 ```
 
-**Weighted tokens.** A cached read costs a tenth of a fresh input token and an output
-token costs five times one, so a raw total is a poor proxy for what a subscription is
-being charged. Every count is weighted by class before it reaches a gauge.
+On the dashboard the five-hour window is the panel — one percentage, one bar, one reset
+time. The weekly limit sits behind a dropdown, because it is the number you check
+occasionally rather than the one you watch while you work.
 
-**The ceilings are estimates.** Anthropic does not publish subscription limits in tokens.
-The presets are calibrated guesses — correct them the first time you hit a wall:
-
-```bash
-python sync.py usage --plan max-20x
-python sync.py usage --window-tokens 30000000 --weekly-tokens 400000000
-```
-
-The burn rate, the raw counts and the reset clock are measured and exact. Gemini's and
-Codex's numbers come from their own JSON output and are exact too.
+**Why not count the tokens.** Earlier versions read every assistant turn out of
+`~/.claude/projects/<slug>/<session>.jsonl`, weighted the four token classes by price and
+measured the total against a ceiling. Anthropic does not publish those ceilings, so the
+ceiling was a guess, and a gauge reading 23% when you are really at 60% is worse than no
+gauge. Asking beats estimating.
 
 ## Requirements
 
@@ -336,7 +328,7 @@ Everything is optional — the dashboard does all of it.
 | `python sync.py ask "..."` | put a need on the table from the terminal |
 | `python sync.py ask "..." --lens resume --seat gemini --seat claude` | pick the lens and the running order |
 | `python sync.py doctor` | check every seat with one tiny real call |
-| `python sync.py usage` | measured Claude spend and headroom |
+| `python sync.py usage` | what Claude says is left of your limits |
 | `python sync.py list` | topics on the table |
 | `python sync.py setup --path DIR` | make a table somewhere without opening the dashboard |
 

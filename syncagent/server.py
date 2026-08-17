@@ -18,7 +18,7 @@ from . import seats as S
 from . import table as T
 from . import ui
 from .runner import Runner
-from .usage import agent_state, claude_usage_report
+from .usage import UsageMeter, agent_state
 from .util import have, now_iso, parse_ts, read_json, write_json
 
 TURN_FILE = re.compile(r"^[0-9]{2}-[a-z0-9]+-[a-z0-9-]*\.md$")
@@ -33,7 +33,7 @@ def health_path(root):
     return T.table_dir(root) / "health.json"
 
 
-def collect_state(root, runner):
+def collect_state(root, runner, meter):
     cfg = T.load_config(root)
     events = T.load_telemetry(root)
     topics = T.all_topics(root)
@@ -75,7 +75,6 @@ def collect_state(root, runner):
             "enabled": seat.get("enabled", True),
             "installed": installed,
             "turns": len(ok_turns),
-            "tokens": sum(e.get("tokens_total", 0) for e in turns),
             "idle_seconds": idle,
             "state": state,
             "problem": problem,
@@ -100,7 +99,7 @@ def collect_state(root, runner):
         "lenses": [{"key": k, "label": v["label"]} for k, v in T.LENSES.items()],
         "topics": out,
         "runner": runner.state(),
-        "usage": claude_usage_report(root, cfg),
+        "usage": meter.report(),
         "updated": now_iso(),
     }
 
@@ -109,7 +108,7 @@ def collect_state(root, runner):
 # server
 # --------------------------------------------------------------------------
 
-def build_handler(root, runner):
+def build_handler(root, runner, meter):
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -144,7 +143,7 @@ def build_handler(root, runner):
             if parsed.path in ("/", "/index.html"):
                 return self._send(ui.PAGE, "text/html; charset=utf-8")
             if parsed.path == "/api/state":
-                return self._json(collect_state(root, runner))
+                return self._json(collect_state(root, runner, meter))
             if parsed.path == "/api/turn":
                 q = parse_qs(parsed.query)
                 return self._turn(q.get("topic", [""])[0], q.get("file", [""])[0])
@@ -248,7 +247,9 @@ class DashServer(socketserver.ThreadingTCPServer):
 
 def serve(root, port=7777, open_browser=True):
     runner = Runner(root)
-    handler = build_handler(root, runner)
+    claude = (T.load_config(root).get("seats") or {}).get("claude") or {}
+    meter = UsageMeter(root, cmd=claude.get("cmd") or "claude").start()
+    handler = build_handler(root, runner, meter)
     while True:
         try:
             httpd = DashServer(("127.0.0.1", port), handler)
