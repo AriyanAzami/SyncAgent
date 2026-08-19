@@ -1,6 +1,13 @@
-# A table is machine-local working state, not source. Topics, turns, telemetry
-# and the seat config all live in here, and none of it belongs in the project.
-table/
+# Your material and your work are yours. The folder READMEs are tracked so a
+# fresh clone still explains itself; nothing else in here belongs in the repo.
+input/*
+!input/README.md
+
+table/*
+!table/README.md
+
+output/*
+!output/README.md
 
 # Claude Code local overrides
 .claude/settings.local.json

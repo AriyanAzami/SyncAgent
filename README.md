@@ -2,11 +2,11 @@
 
 # SyncAgent
 
-**A table your AI agents sit around.**
+**Claude Code does the work. The other AIs tell it what's wrong.**
 
-Put a need on the table. One agent picks it up, leaves a markdown file, and says who
-should take it next. You watch the whole thing on a local dashboard and can retarget any
-step. One agent runs at a time — never two.
+You run Claude Code in this folder and say what you need. It writes down the goal,
+hands it to Codex or Gemini for an honest outside read, does the work itself, then
+checks the result against the goal — and goes round again if it does not pass.
 
 Made by **[Ariyan Azami](https://github.com/AriyanAzami)**
 
@@ -24,376 +24,176 @@ Made by **[Ariyan Azami](https://github.com/AriyanAzami)**
 ```bash
 git clone https://github.com/AriyanAzami/SyncAgent.git
 cd SyncAgent
-python sync.py
+claude
 ```
 
-That is the whole setup. It finds which AI CLIs you have, makes a `table/` folder, and
-opens a dashboard. There is no install, no alias, no config file to write, and nothing to
-learn before you see it work.
+Then drop your material in `input/` and say what you want:
 
-Type what you need into the box. That's it.
+> I put my resume in input/ along with the job posting. Get Codex to review it,
+> fix what it finds, and don't stop until it's actually good.
 
-## Your first five minutes
+That is the whole interface. There is no dashboard, no server, no config file, and
+nothing to install — SyncAgent is a folder Claude Code knows how to work in.
 
-**1. Check your seats work.** Being installed is not the same as being able to answer:
+## Why
 
-```bash
-python sync.py doctor
-```
+An AI is a poor judge of its own writing. It just produced that draft; asking it
+whether the draft is any good gets you a confident yes.
 
-```
-  antigravity  ready   gemini-3.1-pro-high
-  gemini       disabled in config.json
-  claude       ready   claude-opus-5
-  codex        ready   codex
-```
+So the judging is done by a different model, from a different vendor, that never saw
+the draft being written. Codex reads what Claude wrote and says where it is thin.
+Claude fixes it. Then a quality-control pass checks the result against the standard
+that was written down *before* anyone started, so "I addressed all the feedback"
+cannot be mistaken for "this is good now".
 
-**2. Put your material on the table.** Anything the agents should read goes in
-`table/inputs/` — a resume, a job posting, a draft, a spec. You never paste it into a
-chat, and you never paste it twice:
+One agent edits. The rest only have opinions.
 
-```bash
-cp ~/Documents/resume.pdf table/inputs/
-cp ~/Downloads/job-posting.md table/inputs/
-```
+## The three folders
 
-**3. Ask.** In the dashboard box, or from the terminal:
-
-```bash
-python sync.py ask "How is my resume for this posting? Both are in table/inputs/" --lens resume
-```
-
-**4. Read what came back.** Every turn is a file:
-
-```
-table/001-how-is-my-resume/
-  01-antigravity-research.md what the posting really asks for
-  02-claude-critique.md      the judgment, and where the resume falls short
-  ANSWER.md                  the synthesis — read this one
-table/out/
-  resume-review.md           the actual rewrite, from the scribe
-```
-
-That's the loop. Everything below is detail you only need when you want to change
-something.
-
-### A real example of what you get
-
-Asked whether to move sessions from Postgres to Redis, with a four-line note in
-`table/inputs/`, the `decision` lens produced this — abbreviated:
-
-> **Recommendation: no, don't move sessions to Redis.**
->
-> 40 req/s is not load. 2.1M rows is the real signal, and it points somewhere other than
-> Redis — for that many *live* sessions to accumulate, expired rows are almost certainly
-> never deleted. That's a garbage-collection bug. Redis would paper over it, which is the
-> failure mode worth naming: the symptom vanishes, the bug stays.
->
-> **What would have to be true for Redis to be right:** session reads are a measured share
-> of p99; per-request writes are hurting unrelated queries; 10x growth on a known
-> timeline; or Redis is already in production.
-
-Then it stopped and handed the topic back to *me*, because the remaining question —
-what the person who suggested Redis had actually observed — was not in the folder and
-could not be guessed.
-
-**That handoff is the feature.** An agent that stops and says "this needs a fact I don't
-have" is worth more than one that fills the gap confidently.
-
-## What problem this solves
-
-If you pay for more than one AI subscription, you end up pasting the same thing into
-three terminals — the resume into one, the job posting into another, then the first
-one's answer into the third to check it. Every paste costs tokens for context those
-models already had somewhere else, and you are the one holding the thread together.
-
-The obvious fix is to let the agents talk to each other, and that reliably makes it
-worse. Point three models at one question and they spend most of their tokens
-re-establishing context and agreeing with each other. You get a transcript instead of an
-answer, at triple the price.
-
-SyncAgent does something narrower. **One agent works at a time, on a shared folder.** Each
-one reads a small brief plus what the previous agents concluded — never your repository,
-never the whole conversation — writes its answer to a markdown file, and names who should
-take it next.
-
-## How it actually works
-
-Say you drop this on the table:
-
-> How is my resume for the Northwind posting? Both files are in `table/inputs/`.
-
-```
-you ──▶ antigravity       reads both files, researches deep
-          │               writes 01-antigravity-research.md
-          ▼
-        claude            reads only Antigravity's findings — not its whole turn.
-          │               Adds judgment, rewrites the resume into table/out/
-          │               writes 02-claude-critique.md
-          ▼
-        "to: user"        stops, because the remaining gaps are facts only you have
-```
-
-Nobody re-reads the posting. Nobody pastes anything. Claude never sees the research
-Antigravity did to reach its conclusions — only the conclusions, because that is all it
-needs to disagree with them.
-
-Every step leaves a file you can open. Nothing is hidden in a chat history.
-
-## The table is a folder
-
-That is the entire mental model:
-
-```
-table/
-  config.json                who sits where, and how deep each one goes
-  inputs/                    your material. Every seat reads it, none may write to it
-  out/                       real deliverables. Only the scribe writes here
-  001-how-is-my-resume/
-    NEED.md                  what you asked, verbatim
-    BRIEF.md                 the shared context every seat reads. Capped
-    01-antigravity-…-.md     one file per turn
-    02-claude-critique.md
-    ANSWER.md                the synthesis you actually read
-    topic.json               who did what, what it cost, who they handed to
-```
-
-No database, no message bus, no daemon. You can open any of it in a text editor
-mid-run, edit it, and the next agent will read what you wrote.
-
-## Seats
-
-| Seat | CLI | Default job | Depth | Writes files? |
-|---|---|---|---|---|
-| **Antigravity** | `agy` | research and evidence | `deep` | no |
-| **Claude** | `claude` | judgment and critique | `light` | **yes — the scribe** |
-| **Codex** | `codex` | tiebreak, on request | `glance` | no |
-| **Gemini** | `gemini` | research and evidence | `deep` | no — *ships disabled* |
-
-Antigravity holds the research chair because Google withdrew the Gemini CLI's free tier
-for individual accounts. It runs a Gemini model (`gemini-3.1-pro-high` by default), so the
-deep-research seat is still a Gemini — just reached through `agy`. The plain `gemini` seat
-is still there and still works if you have an API key or a paid Code Assist plan; enable
-it in `table/config.json`.
-
-You can reorder them, change any depth, or hand a job to one seat directly.
-
-**Advisory seats genuinely cannot write.** They are launched sandboxed — Antigravity with
-`--sandbox`, Codex with `--sandbox read-only`, Claude with `--permission-mode dontAsk` —
-so it is enforced, not requested. Verified on a real run: a sandboxed seat reads
-`table/inputs/` happily, and a write silently produces no file. Exactly one seat is the **scribe** and is the only one that can produce a real
-deliverable in `table/out/`. Without a scribe, nobody is doing the work; with three,
-they overwrite each other.
-
-### Depth is bytes, not adjectives
-
-This is the part that keeps the bill down. Depth controls *what a seat is physically
-sent*, not just how its prompt is worded:
-
-| Depth | Receives | Asked for |
-|---|---|---|
-| `deep` | the brief + every earlier turn in full | a full document, sources required |
-| `light` | the brief + only the **Findings** of earlier turns | under 400 words |
-| `glance` | the brief + only the **previous** turn's findings | under 150 words, a verdict |
-
-A `light` seat cannot re-litigate reasoning it was never shown. In a real run, the `light`
-seat wrote six paragraphs and the `glance` seat wrote four lines that added a verdict
-without redoing any of the analysis.
-
-And when a seat takes a **second** turn on the same topic, it resumes its own session
-(`claude --resume`, `codex exec resume`) and is sent **nothing** it already has — not even
-the brief.
-
-## Handoffs
-
-Every turn ends with a block the runner parses:
-
-```
-## Handoff
-to: claude
-job: check whether the container migration was actually Kubernetes
-why: you have the base resume and I only have the summary
-```
-
-- `to: <seat>` — that seat goes next. If it isn't the one already planned, it's inserted
-  as a detour and the plan resumes afterwards.
-- `to: user` — stops and waits for you. Used when the gap is a fact only you have.
-- `to: none` — the need is met. The rest of the plan is skipped.
-
-Detours are capped (`max_hops`, default 3) so two agents cannot volley forever.
-
-## The dashboard
-
-`python sync.py` opens `http://127.0.0.1:7777` (localhost only, never your network).
-
-- **Put a need on the table** — type it, pick a lens, send.
-- **Divide it up** — build the plan yourself: which seat, what depth, what job, in what
-  order. Or leave it and the default relay runs.
-- **Seats** — who is live, how many turns each has taken, and *why a seat can't run* if
-  it can't.
-- **The chain** — every turn as a card you can expand and read, with handoff arrows
-  between them.
-- **Claude limits** — the five-hour window, asked of Claude every minute. The weekly
-  limit is one click away. See below.
-- **The queue** — "gemini is working, 1 waiting". One seat at a time, visibly.
-
-## Lenses
-
-A lens swaps one paragraph of focus into the prompt. Pick it per topic, not per install.
-
-| Lens | Focuses on |
+| | |
 |---|---|
-| `general` | completeness, unsupported claims |
-| `resume` | keyword match, verifiability, weak verbs, ATS formatting |
-| `code` | correctness, edge cases, security — every finding needs a file and line |
-| `writing` | argument structure, repetition, citations |
-| `decision` | the real options, what each costs, a named recommendation |
+| `input/` | what you give them — resume, posting, brief, rubric, data. Never edited. |
+| `table/` | where they talk. One folder per job. |
+| `output/` | what you get back. |
 
-The `resume` lens carries a **truth constraint**: tailoring sharpens what is true, it does
-not invent. If a bullet can't be traced to your real resume, the agent must say so rather
-than write it. Inventing experience is the one failure here that actually costs someone
-an interview, so it's written into the prompt rather than left to good manners.
+A job on the table:
 
-## Claude's limits come from Claude
+```
+table/resume-2027/
+  GOAL.md     what we are making, and what "good" means
+  STATUS.md   the running log — round number, state, what happened
+  material/   text pulled out of PDFs so the advisors can read it
+  notes/
+    01-codex.md    what Codex thought
+    02-qc.md       quality control: PASS or REVISE, and why
+```
 
-`/usage` is a local slash command, so `claude -p /usage` answers off the same meter the
-app itself draws: no API call, no tokens, about a quarter of a second. The dashboard asks
-once a minute and shows what comes back.
+`GOAL.md` is the shared ground. Claude Code writes it, every advisor reads it, and
+quality control judges against it rather than against anyone's opinion. Everything
+the agents say to each other is a markdown file you can open, and it is all still
+there tomorrow.
+
+## The loop
+
+```
+     you: "here's my resume, make it good"
+        │
+        ▼
+   ┌─ GOAL.md ─────────── Claude writes down the bar
+   │    │
+   │    ▼
+   │  ask.py codex ────── an outside read, lands in notes/
+   │    │
+   │    ▼
+   │  Claude edits ────── the only agent that touches a file
+   │    │
+   │    ▼
+   │  quality control ─── against GOAL.md, not against effort
+   │    │
+   │    ├── PASS ───────► output/resume.md, and you're done
+   │    │
+   └────┴── REVISE ────── the reasons become the next round's question
+```
+
+## Asking an advisor
+
+Claude Code runs these for you. You can run them yourself too:
 
 ```bash
-python sync.py usage
+python ask.py doctor              which CLIs on this machine can actually answer
+python ask.py new resume-2027     make a job folder
+python ask.py codex resume-2027   get Codex's read on it
+python ask.py gemini resume-2027 -m "only the summary section"
 ```
 
+Each call runs that CLI **read-only** against this folder and writes its answer to
+`table/<job>/notes/`. The advisors cannot edit anything, and nothing they say is
+applied automatically — a report is an opinion in a file until Claude Code acts on it.
+
+`doctor` makes a real call to each one, because being installed and being able to
+answer are different things:
+
 ```
-5h window          [####........................]  13.0%
-                   resets Aug 16, 10:29pm (America/Toronto)
-week (all models)  [#####.......................]  17.0%
-                   resets Aug 22, 6:59am (America/Toronto)
+  codex        ready      answered in 14.5s
+  gemini       blocked    Gemini's free CLI tier is withdrawn for individual
+                          accounts. Set GEMINI_API_KEY or GOOGLE_CLOUD_PROJECT.
+  antigravity  ready      answered in 9.8s
+  claude       ready      answered in 9.1s
 ```
 
-On the dashboard the five-hour window is the panel — one percentage, one bar, one reset
-time. The weekly limit sits behind a dropdown, because it is the number you check
-occasionally rather than the one you watch while you work.
+Whichever ones you have, work. Nothing here requires all four.
 
-**Why not count the tokens.** Earlier versions read every assistant turn out of
-`~/.claude/projects/<slug>/<session>.jsonl`, weighted the four token classes by price and
-measured the total against a ceiling. Anthropic does not publish those ceilings, so the
-ceiling was a guess, and a gauge reading 23% when you are really at 60% is worse than no
-gauge. Asking beats estimating.
+## Skills — teaching it your work
+
+`.claude/skills/` is what makes Claude Code know what to do without being told each
+time. Four ship with the repo:
+
+| Skill | What it is |
+|---|---|
+| `table` | the loop above — goal, advisor, work, quality control, repeat |
+| `quality-control` | the gate. `PASS` or `REVISE`, judged against `GOAL.md` |
+| `resume` | what a good resume is, and the bar to hold one to |
+| `assignment` | coursework: the rubric is the bar, and where the line is |
+
+Add your own. A skill is one markdown file — `.claude/skills/<name>/SKILL.md` — with
+a name, a description of when to use it, and your standard written out in plain
+English. Copy `resume` and change what "good" means. That is the whole extension
+model, and it is the part worth investing in: the loop is generic, your standards
+are not.
+
+Or just ask Claude Code to write one after a job goes well. It knows the format.
+
+## What a round actually looks like
+
+> **You:** My resume's in input/ with the posting. Get an outside opinion.
+>
+> **Claude:** Reading both. The posting is a backend role, three-plus years, heavy on
+> data pipelines. I've written the bar into `table/resume-2027/GOAL.md`: one page,
+> every bullet leads with an outcome, backend evidence visible in the top third.
+> Your resume is a PDF, so I've pulled the text into `material/` for the advisors.
+> Asking Codex now.
+>
+> *(50 seconds)*
+>
+> **Claude:** Codex screened it in ten seconds like a hiring manager would and never
+> reached your pipeline work — it sits at line 14, under an education block. Four of
+> your nine bullets describe duties rather than results. It also wants a skills
+> matrix; I'm skipping that, it costs a third of the page and you want one page.
+>
+> Rewriting now.
+>
+> *(edits)*
+>
+> **Claude:** Quality control: **REVISE**. The top third is fixed, but two bullets
+> still have no outcome and I can't invent the numbers. What came of the migration
+> in the second role — how much faster, or how many fewer incidents?
+
+That is the shape of it. Outside judgement, applied by the one agent that can
+actually type, checked against a standard written before anyone got attached to
+the draft.
 
 ## Requirements
 
-**Python 3.8+**, standard library only. Nothing to install.
+- **Python 3.8+**, standard library only. No `pip install`.
+- **[Claude Code](https://claude.ai/code)** — the agent that does the work.
+- **At least one advisor CLI**, signed in and working:
+  [Codex](https://github.com/openai/codex),
+  [Gemini CLI](https://github.com/google-gemini/gemini-cli),
+  [Antigravity](https://antigravity.google) (`agy`).
+  Run `python ask.py doctor` to see where you stand.
 
-**Your own accounts.** SyncAgent bundles no models and no API keys. You install the CLIs
-yourself and it uses whatever you're already paying for:
+macOS, Linux and Windows.
 
-| CLI | Install |
-|---|---|
-| Antigravity (`agy`) | https://antigravity.google |
-| Claude Code | https://docs.claude.com/en/docs/claude-code/setup |
-| Codex CLI | https://github.com/openai/codex |
-| Gemini CLI *(optional)* | https://github.com/google-gemini/gemini-cli |
+## What this is not
 
-`agy` does not always put itself on your PATH — it ships an `agy install` subcommand for
-that. SyncAgent looks in its install directory anyway, so it works either way.
+Not an agent framework, not an orchestrator, and not a broadcast that asks four
+models the same question and averages them. There is one worker and one standard,
+and the only thing the other models contribute is judgement.
 
-**One is enough to start.** With two you get the cross-check that is the point of the
-tool. Missing seats are simply disabled.
-
-Check what actually works — this costs a few tokens and is worth it:
-
-```bash
-python sync.py doctor
-```
-
-```
-  gemini   BLOCKED    Gemini's free CLI tier has been withdrawn for individual
-                      accounts. Set GEMINI_API_KEY (from aistudio.google.com/apikey)
-                      or GOOGLE_CLOUD_PROJECT, then retry.
-  claude   ready      claude-opus-5
-  codex    ready      codex
-```
-
-A seat can be installed, logged in, and still unable to answer. `doctor` makes one real
-call per seat, because that is the only thing that tells the difference.
-
-## Commands
-
-Everything is optional — the dashboard does all of it.
-
-| Command | Does |
-|---|---|
-| `python sync.py` | set up if needed, then open the table |
-| `python sync.py ask "..."` | put a need on the table from the terminal |
-| `python sync.py ask "..." --lens resume --seat gemini --seat claude` | pick the lens and the running order |
-| `python sync.py doctor` | check every seat with one tiny real call |
-| `python sync.py usage` | what Claude says is left of your limits |
-| `python sync.py list` | topics on the table |
-| `python sync.py setup --path DIR` | make a table somewhere without opening the dashboard |
-
-`python -m syncagent` works identically if you prefer it.
-
-## Security
-
-**The scribe writes files.** It runs with edits auto-accepted so it can produce
-deliverables without prompting you mid-run. Deny rules in `.claude/settings.json` are
-evaluated *before* the permission mode and still hold: `table/inputs/` is read-only,
-`.env` is unreadable, `sudo` and piped-curl-to-shell are blocked.
-
-**Advisory seats are sandboxed** at the CLI level, not merely instructed.
-
-**Treat `table/inputs/` as untrusted.** When an agent reads a PDF, a web page, or a
-document you didn't write, that content can contain instructions aimed at the agent. This
-is a real failure mode of this kind of tool, not a hypothetical.
-
-**The dashboard binds to `127.0.0.1` only** and is not reachable from your network. It
-reads files only from inside a topic folder, and the filename is pattern-checked.
-
-## Troubleshooting
-
-**Gemini fails with `IneligibleTierError`** — Google withdrew the free Gemini CLI tier for
-individual accounts, which is why the `gemini` seat ships disabled and Antigravity holds
-the research chair instead. If you want the `gemini` seat back, set `GEMINI_API_KEY` from
-[aistudio.google.com/apikey](https://aistudio.google.com/apikey) or `GOOGLE_CLOUD_PROJECT`
-for a paid Code Assist plan, then enable it in `table/config.json`.
-
-**An Antigravity turn returns nothing** — it reports `SUCCESS` with an empty response when
-a tool it reached for was denied. Give that seat reasoning work, or make it the scribe if
-it genuinely needs to write.
-
-**A very long Antigravity prompt gets truncated** — `agy -p` takes the prompt as a
-command-line argument rather than on stdin, and Windows caps a command line at 32,767
-characters, so prompts are capped at 28,000 with a visible marker. Only a `deep` seat
-carrying several earlier turns gets near it.
-
-**A seat is "not on your PATH"** — check with `which claude gemini codex` (PowerShell:
-`Get-Command claude, gemini, codex`). SyncAgent runs Python, not the CLIs; you install
-those separately.
-
-**macOS: `command not found: python`** — macOS ships only `python3`. Use
-`python3 sync.py`.
-
-**A turn used far more tokens than expected** — `claude -p` loads your project's
-`CLAUDE.md`, hooks and MCP servers the same way an interactive session does. A large
-project context makes every turn expensive. Run the table from a folder that isn't a huge
-repo.
-
-**Nothing runs after I send** — check the Seats panel. A blocked seat shows the reason,
-and the relay stops rather than skipping to a seat you didn't choose.
-
-**`No table/ folder here or above`** — every command except the bare `python sync.py`
-expects to be inside a table. Run it with no arguments to create one.
-
-## Contributing
-
-Issues and pull requests welcome. One rule: **standard library only** — see
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-```bash
-python -m unittest discover -s tests
-```
+Your job folders, your material and your output stay on your machine — `input/`,
+`table/` and `output/` are gitignored so a clone of this repo never carries your
+resume in it.
 
 ## License
 
-MIT © [Ariyan Azami](https://github.com/AriyanAzami). See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
